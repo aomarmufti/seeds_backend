@@ -64,7 +64,7 @@ module.exports = async (req, res) => {
       tutors: tutorMap,
       studentCount: students.length,
       bookingCount: bookings.length,
-      recentBookings: bookings.slice(0, 15).map(b => ({
+      recentBookings: bookings.slice(0, 25).map(b => ({
         id: b.id,
         studentName: b.students?.student_name || '—',
         tutorName: b.tutor_name,
