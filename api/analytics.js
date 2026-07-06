@@ -6,7 +6,62 @@ const TUTOR_CUT = 0.78;
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
+
+  // ── POST: booking management (cancel / reschedule) ────────────────────
+  if (req.method === 'POST') {
+    const { action, bookingId, newStartTime } = req.body || {};
+    if (action === 'cancel-booking') {
+      if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+      try {
+        const { supabaseRequest } = require('../lib/db');
+        const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+    if (action === 'reschedule-booking') {
+      if (!bookingId || !newStartTime) return res.status(400).json({ error: 'bookingId and newStartTime required' });
+      try {
+        const { supabaseRequest } = require('../lib/db');
+        const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ start_time: newStartTime }),
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+    return res.status(400).json({ error: 'Unknown action' });
+  }
+
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  // ?resource=students returns the full students list with bookings
+  if (req.query.resource === 'students') {
+    try {
+      const data = await dbGet(
+        '/students?select=*,bookings(id,lesson_type,start_time,tutor_name,status)&order=created_at.desc'
+      );
+      return res.status(200).json(data);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // Pending student signups (read via service key so profiles can be locked down)
+  if (req.query.resource === 'pending-profiles') {
+    try {
+      const data = await dbGet(
+        '/profiles?role=eq.pending&select=id,full_name,email,subject,level,created_at&order=created_at.desc'
+      );
+      return res.status(200).json(data);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
 
   try {
     const [bookings, students, payouts] = await Promise.all([
@@ -73,6 +128,7 @@ module.exports = async (req, res) => {
         startTime: b.start_time,
         feePence: b.fee_pence,
         status: b.status,
+        meetLink: b.meet_link || null,
       })),
       payouts: payouts.slice(0, 10),
     });
