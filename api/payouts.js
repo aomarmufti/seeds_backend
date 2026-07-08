@@ -8,8 +8,13 @@ function getStripe() {
 }
 
 async function getTutorAccount(tutorName) {
-  const rows = await dbGet(`/tutor_accounts?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
-  return rows.length ? rows[0] : null;
+  try {
+    const rows = await dbGet(`/tutor_accounts?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
+    return rows.length ? rows[0] : null;
+  } catch(e) {
+    // Table doesn't exist yet — return null so callers can handle gracefully
+    return null;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -50,7 +55,13 @@ module.exports = async (req, res) => {
           return res.status(200).json({ connected: true, onboardingComplete: complete, accountId: acct.stripe_account_id });
         }
         return res.status(200).json({ connected: true, onboardingComplete: acct.onboarding_complete, accountId: acct.stripe_account_id });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
+      } catch(e) {
+        // If table doesn't exist yet, return not-connected rather than crashing
+        if (e.message && (e.message.includes('tutor_accounts') || e.message.includes('schema cache') || e.message.includes('42P01'))) {
+          return res.status(200).json({ connected: false, onboardingComplete: false, setupRequired: true });
+        }
+        return res.status(500).json({ error: e.message });
+      }
     }
 
     let path = '/payouts?order=requested_at.desc';
@@ -100,7 +111,12 @@ module.exports = async (req, res) => {
           type: 'account_onboarding',
         });
         return res.status(200).json({ success: true, url: link.url, accountId });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
+      } catch(e) {
+        const msg = /Connect|signed up|platform/i.test(e.message)
+          ? 'Stripe Connect is not enabled on your Stripe account yet. Admin: go to Stripe Dashboard → Connect → Get started → choose Express accounts. Then try again.'
+          : e.message;
+        return res.status(500).json({ error: msg });
+      }
     }
 
     if (action === 'approve-and-transfer' || body.markPaid) {
