@@ -100,16 +100,26 @@ module.exports = async (req, res) => {
     const byType = { gcse: 0, alevel: 0, group: 0, trial: 0 };
     bookings.forEach(b => { if (b.lesson_type in byType) byType[b.lesson_type]++; });
 
-    // Per-tutor
+    // Per-tutor — use ALL bookings for accurate totals
     const tutorMap = {};
     bookings.forEach(b => {
       if (!tutorMap[b.tutor_name]) tutorMap[b.tutor_name] = { lessons: 0, revenue: 0, unpaid: 0 };
       tutorMap[b.tutor_name].lessons++;
       tutorMap[b.tutor_name].revenue += b.fee_pence;
     });
+    // Unpaid = sum of REQUESTED payouts from payouts table (what tutor actually requested)
+    // Fall back to calculating from confirmed bookings if no payout request exists
+    payouts.filter(p => p.status === 'requested').forEach(p => {
+      if (tutorMap[p.tutor_name]) {
+        tutorMap[p.tutor_name].unpaid = p.amount_pence;
+        tutorMap[p.tutor_name].payoutId = p.id;
+      }
+    });
+    // For tutors with no payout request, show what they COULD request
     bookings.filter(b => b.status === 'confirmed' && b.fee_pence > 0).forEach(b => {
-      if (tutorMap[b.tutor_name])
+      if (tutorMap[b.tutor_name] && !tutorMap[b.tutor_name].payoutId) {
         tutorMap[b.tutor_name].unpaid += Math.round(b.fee_pence * TUTOR_CUT);
+      }
     });
 
     res.status(200).json({
