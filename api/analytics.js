@@ -139,6 +139,8 @@ module.exports = async (req, res) => {
         feePence: b.fee_pence,
         status: b.status,
         meetLink: b.meet_link || null,
+        paymentIntentId: b.stripe_payment_intent_id || null,
+        parentEmail: b.students?.parent_email || null,
       })),
       payouts: payouts.slice(0, 10),
     });
