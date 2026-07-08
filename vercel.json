@@ -3,6 +3,10 @@
     {
       "path": "/api/bookings?action=remind",
       "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/lifecycle?resource=auto-payout",
+      "schedule": "0 0 * * 0"
     }
   ]
 }
