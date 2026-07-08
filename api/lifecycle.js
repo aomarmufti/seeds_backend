@@ -13,6 +13,44 @@ module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   const resource = req.query.resource;
 
+  // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
+  if (resource === 'auto-payout') {
+    const stripe = getStripe();
+    if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+    try {
+      const accounts = await dbGet('/tutor_accounts?onboarding_complete=eq.true');
+      const results = [];
+      for (const acct of accounts) {
+        const bookings = await dbGet(
+          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`
+        );
+        if (!bookings.length) { results.push({ tutor: acct.tutor_name, status: 'nothing_due' }); continue; }
+        const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
+        if (amount < 5000) { results.push({ tutor: acct.tutor_name, status: 'below_minimum', amount }); continue; }
+        try {
+          const transfer = await stripe.transfers.create({
+            amount, currency: 'gbp',
+            destination: acct.stripe_account_id,
+            description: `Seeds weekly payout — ${acct.tutor_name} — ${new Date().toISOString().slice(0,10)}`,
+          });
+          await supabaseRequest(
+            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`,
+            { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
+          );
+          await dbPost('/payouts', {
+            tutor_name: acct.tutor_name, amount_pence: amount,
+            status: 'paid', paid_at: new Date().toISOString(),
+            stripe_transfer_id: transfer.id, transfer_status: 'paid',
+          });
+          results.push({ tutor: acct.tutor_name, status: 'paid', amount, transferId: transfer.id });
+        } catch(e) {
+          results.push({ tutor: acct.tutor_name, status: 'failed', error: e.message });
+        }
+      }
+      return res.status(200).json({ success: true, processed: results.length, results });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
   // ── LESSONS — tutor creates a booking directly ────────────────────────
   if (resource === 'lessons') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -129,10 +167,45 @@ module.exports = async (req, res) => {
           method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ payment_link: session.url }),
         });
+
+        // Email the payment link to the student
+        try {
+          const nodemailer = require('nodemailer');
+          const transporter = nodemailer.createTransport({
+            host: 'smtp.resend.com', port: 587, secure: false,
+            auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
+          });
+          const lessonDate = new Date(startTime).toLocaleDateString('en-GB', {weekday:'long',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'});
+          await transporter.sendMail({
+            from: `"Seeds Tuition" <${process.env.EMAIL_FROM}>`,
+            to: studentEmail,
+            subject: `Payment required — ${subject || 'lesson'} with ${tutorName}`,
+            html: `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f5f5f0;margin:0;padding:24px">
+              <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden">
+                <div style="background:#0D1B2A;padding:24px 28px">
+                  <h1 style="font-family:Georgia,serif;color:#fff;margin:0;font-size:22px">Seeds Tuition</h1>
+                </div>
+                <div style="padding:24px 28px">
+                  <h2 style="font-family:Georgia,serif;color:#0D1B2A;margin-bottom:8px">Payment required for your lesson</h2>
+                  <p style="color:#4A5568;font-size:15px">Hi ${studentName},</p>
+                  <p style="color:#4A5568;font-size:15px">${tutorName} has scheduled a ${subject || ''} lesson for <strong>${lessonDate}</strong>. Please pay to confirm your place.</p>
+                  <div style="background:#FAF8F4;border-radius:10px;padding:14px 16px;margin:18px 0;font-size:14px">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:#718096">Subject</span><span style="font-weight:600">${subject||'—'}</span></div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:#718096">Tutor</span><span style="font-weight:600">${tutorName}</span></div>
+                    <div style="display:flex;justify-content:space-between"><span style="color:#718096">Amount</span><span style="font-weight:700;color:#0D1B2A">£${(pricing.amount/100).toFixed(2)}</span></div>
+                  </div>
+                  <a href="${session.url}" style="display:block;background:#0D1B2A;color:#fff;text-decoration:none;text-align:center;padding:14px;border-radius:10px;font-weight:700;font-size:15px;margin-bottom:16px">Pay £${(pricing.amount/100).toFixed(2)} now →</a>
+                  <p style="font-size:12px;color:#A7A7A7">Secured by Stripe. Your card details are never stored on Seeds' servers.</p>
+                </div>
+              </div>
+            </body></html>`,
+          });
+        } catch(emailErr) { console.warn('Payment link email failed:', emailErr.message); }
+
         return res.status(200).json({
           status: 'payment_link',
           url: session.url,
-          message: 'No saved card — payment link created for student',
+          message: 'No saved card — payment link emailed to student',
         });
       }
     } catch(e) {
