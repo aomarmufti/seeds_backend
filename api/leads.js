@@ -88,16 +88,20 @@ module.exports = async (req, res) => {
 
         // Send confirmation email (best-effort)
         try {
-          const { sendBookingConfirmation } = require('../lib/reminders');
-          await sendBookingConfirmation({
-            studentName: lead.name,
-            parentName: lead.name,
-            parentEmail: lead.email,
-            tutorName, subject: lead.subject,
-            lessonType: 'trial', studentLevel: lead.level,
-            startTime: chosenSlot, durationMins: pricing.duration,
-            meetingLink, amountPence: 0,
-          });
+          const { sendBookingConfirmation, sendSlotBookedToTutor } = require('../lib/reminders');
+          const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
+          const tutorEmail = profiles[0]?.email;
+          await Promise.all([
+            sendBookingConfirmation({
+              studentName: lead.name, parentName: lead.name, parentEmail: lead.email,
+              tutorName, subject: lead.subject, lessonType: 'trial', studentLevel: lead.level,
+              startTime: chosenSlot, durationMins: pricing.duration, meetingLink, amountPence: 0,
+            }),
+            tutorEmail ? sendSlotBookedToTutor({
+              tutorEmail, tutorName, studentName: lead.name,
+              subject: lead.subject, startTime: chosenSlot, meetingLink,
+            }) : Promise.resolve(),
+          ]);
         } catch(e) { console.warn('Email failed:', e.message); }
 
         return res.status(201).json({ success: true, booking, meetingLink });
@@ -118,6 +122,17 @@ module.exports = async (req, res) => {
         availability: availability || [],
         status: 'new',
       });
+
+      // Email parent confirmation + alert admin (best-effort, non-blocking)
+      try {
+        const { sendEnquiryConfirmation, sendAdminEnquiryAlert } = require('../lib/reminders');
+        const adminEmail = process.env.ADMIN_EMAIL || 'azeemomar-mufti@outlook.com';
+        await Promise.all([
+          sendEnquiryConfirmation({ name, email, subject, level, goal }),
+          sendAdminEnquiryAlert({ adminEmail, studentName: name, subject, level, goal, studentEmail: email }),
+        ]);
+      } catch(emailErr) { console.warn('Enquiry email failed:', emailErr.message); }
+
       return res.status(201).json({ success: true, lead });
     } catch(e) {
       return res.status(500).json({ error: e.message });
@@ -140,6 +155,23 @@ module.exports = async (req, res) => {
       const data = await r.json();
       if (!r.ok) throw new Error(JSON.stringify(data));
       const lead = data[0];
+
+      // Email tutor when a student is assigned to them
+      if (updates.status === 'assigned' && updates.assigned_tutor && lead) {
+        try {
+          const { sendTutorAssigned } = require('../lib/reminders');
+          const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(updates.assigned_tutor)}&limit=1`);
+          const tutorEmail = profiles[0]?.email;
+          if (tutorEmail) {
+            await sendTutorAssigned({
+              tutorEmail, tutorName: updates.assigned_tutor,
+              studentName: lead.name || 'A new student',
+              subject: lead.subject || '', level: lead.level || '',
+              goal: lead.goal || '', availability: lead.availability || [],
+            });
+          }
+        } catch(emailErr) { console.warn('Tutor assigned email failed:', emailErr.message); }
+      }
 
       // If proposed slots were saved, email the student to go pick one
       if (notes) {
