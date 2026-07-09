@@ -66,6 +66,7 @@ module.exports = async (req, res) => {
       for (const b of bookings) {
         const email = b.students && b.students.parent_email;
         if (!email) continue;
+        // Notify student
         try {
           await sendLessonReminder({
             studentName: b.students.student_name || 'your student',
@@ -78,6 +79,31 @@ module.exports = async (req, res) => {
           });
           sent++;
         } catch(e) { errors.push(`${email}: ${e.message}`); }
+
+        // Also notify tutor
+        try {
+          const { dbGet } = require('../../lib/db');
+          const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(b.tutor_name)}&limit=1`);
+          const tutorEmail = profiles[0]?.email;
+          if (tutorEmail) {
+            const nodemailer = require('nodemailer');
+            const t = nodemailer.createTransport({
+              host: 'smtp.resend.com', port: 465, secure: true,
+              auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
+            });
+            const time = new Date(b.start_time).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+            await t.sendMail({
+              from: `"Seeds Tuition" <${process.env.EMAIL_FROM}>`,
+              to: tutorEmail,
+              subject: `Today's lesson: ${b.students?.student_name} at ${time}`,
+              html: `<div style="font-family:Arial,sans-serif;max-width:500px;padding:20px">
+                <h2 style="color:#0D1B2A;font-family:Georgia,serif">📅 Lesson reminder</h2>
+                <p>You have a <strong>${b.subject}</strong> lesson today with <strong>${b.students?.student_name}</strong> at <strong>${time}</strong>.</p>
+                ${b.meet_link ? `<a href="${b.meet_link}" style="display:inline-block;background:#0D1B2A;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px;font-weight:700">Join lesson →</a>` : ''}
+              </div>`,
+            });
+          }
+        } catch(tutorErr) { console.warn('Tutor reminder failed:', tutorErr.message); }
       }
       return res.status(200).json({
         success: true,
@@ -102,7 +128,20 @@ module.exports = async (req, res) => {
       const pricing = resolvePrice(lessonType, studentLevel);
       const meetingLink = getMeetingLink(tutorName);
 
-      const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(parentEmail)}&limit=1`);
+      // Conflict check — prevent double-booking a tutor
+      if (tutorName !== 'Best available match') {
+        const slotEnd = new Date(new Date(startTime).getTime() + pricing.duration * 60000);
+        const conflicts = await dbGet(
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=neq.cancelled` +
+          `&start_time=gte.${new Date(startTime).toISOString()}&start_time=lt.${slotEnd.toISOString()}&limit=1`
+        );
+        if (conflicts.length) {
+          return res.status(409).json({
+            error: `${tutorName} is already booked at that time. Please choose a different slot.`,
+            conflict: true,
+          });
+        }
+      }
       const student = existing.length
         ? existing[0]
         : await dbPost('/students', {
