@@ -89,4 +89,108 @@ module.exports = async (req, res) => {
   }
 
   return res.status(400).json({ error: 'Unknown action: ' + action });
+
+  // ── EDIT STUDENT ──────────────────────────────────────────────────────
+  if (action === 'edit-student') {
+    const { userId, fullName, subject, level, assignedTutor } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    try {
+      const updates = {};
+      if (fullName) updates.full_name = fullName;
+      if (subject !== undefined) updates.subject = subject;
+      if (level !== undefined) updates.level = level;
+      if (assignedTutor !== undefined) updates.assigned_tutor = assignedTutor;
+      const r = await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(updates) }
+      );
+      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── EDIT TUTOR ────────────────────────────────────────────────────────
+  if (action === 'edit-tutor') {
+    const { userId, fullName, tutorName, email } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    try {
+      const profileUpdates = {};
+      if (fullName) profileUpdates.full_name = fullName;
+      if (tutorName) profileUpdates.tutor_name = tutorName;
+      if (email) profileUpdates.email = email;
+      const r = await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(profileUpdates) }
+      );
+      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      if (email) {
+        await supabaseRequest('/auth/v1/admin/users/' + userId,
+          { method: 'PUT', body: JSON.stringify({ email }) }
+        );
+      }
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── DEACTIVATE TUTOR ──────────────────────────────────────────────────
+  if (action === 'deactivate-tutor') {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    try {
+      // Ban the user in Supabase auth
+      await supabaseRequest('/auth/v1/admin/users/' + userId,
+        { method: 'PUT', body: JSON.stringify({ ban_duration: '876600h' }) } // ~100 years
+      );
+      // Mark profile as deactivated
+      await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'deactivated' }) }
+      );
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── BULK EMAIL (announcement) ─────────────────────────────────────────
+  if (action === 'bulk-email') {
+    const { subject: emailSubject, body: emailBody, to } = req.body;
+    // to: 'all-students' | 'all-tutors' | 'all'
+    if (!emailSubject || !emailBody) return res.status(400).json({ error: 'subject and body required' });
+    try {
+      const { dbGet } = require('../lib/db');
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.resend.com', port: 465, secure: true,
+        auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
+      });
+      let emails = [];
+      if (to === 'all-students' || to === 'all') {
+        const students = await dbGet('/students?select=parent_email&order=created_at.desc');
+        emails.push(...students.map(s => s.parent_email).filter(Boolean));
+      }
+      if (to === 'all-tutors' || to === 'all') {
+        const tutors = await dbGet('/profiles?role=eq.tutor&select=email');
+        emails.push(...tutors.map(t => t.email).filter(Boolean));
+      }
+      emails = [...new Set(emails)]; // deduplicate
+      let sent = 0;
+      for (const email of emails) {
+        try {
+          await transporter.sendMail({
+            from: `"Seeds Tuition" <${process.env.EMAIL_FROM}>`,
+            to: email,
+            subject: emailSubject,
+            html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
+              <div style="background:#0D1B2A;padding:20px 24px;border-radius:12px 12px 0 0">
+                <h2 style="font-family:Georgia,serif;color:#fff;margin:0;font-size:20px">Seeds Tuition</h2>
+              </div>
+              <div style="background:#fff;padding:24px;border:1px solid #E8E8E8;border-top:none;border-radius:0 0 12px 12px">
+                <h3 style="color:#0D1B2A;font-family:Georgia,serif;margin-bottom:14px">${emailSubject}</h3>
+                <div style="color:#4A5568;font-size:15px;line-height:1.7">${emailBody.replace(/\n/g,'<br>')}</div>
+                <div style="margin-top:20px;padding-top:14px;border-top:1px solid #F0EDE8;font-size:12px;color:#A7A7A7">Seeds Tuition · seedstuition.co.uk</div>
+              </div>
+            </div>`,
+          });
+          sent++;
+        } catch(e) { console.warn('Email failed for', email, e.message); }
+      }
+      return res.status(200).json({ success: true, sent, total: emails.length });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
 };
