@@ -31,10 +31,35 @@ module.exports = async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  const { supabaseRequest } = require('../lib/db');
+
   switch (event.type) {
     case 'payment_intent.succeeded': {
       const pi = event.data.object;
       console.log(`✅ Payment succeeded: ${pi.id} — £${pi.amount / 100}`);
+      // Update booking if linked via metadata
+      if (pi.metadata && pi.metadata.bookingId) {
+        await supabaseRequest(`/bookings?id=eq.${pi.metadata.bookingId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ stripe_payment_intent_id: pi.id, status: 'confirmed' }),
+        });
+      }
+      break;
+    }
+    case 'checkout.session.completed': {
+      // Student paid via payment link
+      const session = event.data.object;
+      if (session.metadata && session.metadata.bookingId) {
+        await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({
+            stripe_payment_intent_id: session.payment_intent,
+            status: 'confirmed',
+            payment_link: null, // clear the link — it's been paid
+          }),
+        });
+        console.log(`✅ Checkout paid: booking ${session.metadata.bookingId}`);
+      }
       break;
     }
     case 'payment_intent.payment_failed': {
