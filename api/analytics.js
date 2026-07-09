@@ -13,13 +13,34 @@ module.exports = async (req, res) => {
     if (action === 'cancel-booking') {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
       try {
-        const { supabaseRequest } = require('../lib/db');
+        const { supabaseRequest, dbGet } = require('../lib/db');
+
+        // Fetch booking to check if it was paid
+        const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+        const booking = bookings[0];
+        let refundId = null;
+
+        // Issue Stripe refund if there was a payment
+        if (booking?.stripe_payment_intent_id && process.env.STRIPE_SECRET_KEY) {
+          try {
+            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+            const refund = await stripe.refunds.create({
+              payment_intent: booking.stripe_payment_intent_id,
+              reason: 'requested_by_customer',
+            });
+            refundId = refund.id;
+          } catch(stripeErr) {
+            // Log but don't block the cancellation
+            console.warn('Stripe refund failed:', stripeErr.message);
+          }
+        }
+
         const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ status: 'cancelled' }),
         });
         if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
-        return res.status(200).json({ success: true });
+        return res.status(200).json({ success: true, refundId, refunded: !!refundId });
       } catch(e) { return res.status(500).json({ error: e.message }); }
     }
     if (action === 'reschedule-booking') {
@@ -141,6 +162,7 @@ module.exports = async (req, res) => {
         meetLink: b.meet_link || null,
         paymentIntentId: b.stripe_payment_intent_id || null,
         parentEmail: b.students?.parent_email || null,
+        studentId: b.student_id || null,
       })),
       payouts: payouts.slice(0, 10),
     });
@@ -149,4 +171,3 @@ module.exports = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-
