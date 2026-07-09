@@ -136,6 +136,19 @@ module.exports = async (req, res) => {
             metadata: { tutorName },
           });
           transferId = transfer.id; transferStatus = 'paid';
+
+          // Notify tutor their payment has landed
+          try {
+            const { sendPayoutNotification } = require('../lib/reminders');
+            const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
+            const tutorEmail = profiles[0]?.email;
+            if (tutorEmail) {
+              await sendPayoutNotification({
+                tutorEmail, tutorName, amountPence: body.amountPence,
+                transferId, isAutomatic: !!body._auto,
+              });
+            }
+          } catch(emailErr) { console.warn('Payout email failed:', emailErr.message); }
         }
         await supabaseRequest(
           `/payouts?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.requested`,
