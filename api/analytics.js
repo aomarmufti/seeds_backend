@@ -112,7 +112,7 @@ module.exports = async (req, res) => {
 
   try {
     const [bookings, students, payouts] = await Promise.all([
-      dbGet('/bookings?select=*,students(student_name,parent_email)&order=start_time.desc'),
+      dbGet('/bookings?select=*,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc'),
       dbGet('/students?select=id,student_name,parent_email,created_at'),
       dbGet('/payouts?select=*&order=requested_at.desc'),
     ]);
@@ -187,7 +187,9 @@ module.exports = async (req, res) => {
         status: b.status,
         meetLink: b.meet_link || null,
         paymentIntentId: b.stripe_payment_intent_id || null,
+        paymentLink: b.payment_link || null,
         parentEmail: b.students?.parent_email || null,
+        stripeCustomerId: b.students?.stripe_customer_id || null,
         studentId: b.student_id || null,
       })),
       payouts: payouts.slice(0, 10),
