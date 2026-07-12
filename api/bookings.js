@@ -7,6 +7,7 @@ const { resolvePrice } = require('../lib/pricing');
 const { sendBookingConfirmation, sendLessonReminder } = require('../lib/reminders');
 const { generateICS } = require('../lib/calendar');
 const { dbPost, dbGet } = require('../lib/db');
+const { requireCronSecret } = require('../lib/cronAuth');
 
 const MEET_LINKS = {
   'Azeem': process.env.MEET_LINK_AZEEM,
@@ -55,6 +56,8 @@ module.exports = async (req, res) => {
         await sendLessonReminder(manual);
         return res.status(200).json({ success: true, message: `Reminder sent to ${manual.parentEmail}` });
       }
+      // The automatic daily sweep is cron-only — require Vercel's cron secret.
+      if (!requireCronSecret(req, res)) return;
       const now = new Date();
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
       const endOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();

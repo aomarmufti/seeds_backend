@@ -3,6 +3,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
+const { requireCronSecret } = require('../lib/cronAuth');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -15,6 +16,7 @@ module.exports = async (req, res) => {
 
   // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
   if (resource === 'auto-payout') {
+    if (!requireCronSecret(req, res)) return;
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
     try {
