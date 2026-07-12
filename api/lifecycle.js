@@ -5,6 +5,7 @@ const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
+const { isValidId } = require('../lib/validate');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -136,6 +137,7 @@ module.exports = async (req, res) => {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
     const { bookingId, studentEmail, lessonType, studentLevel, studentName, tutorName, subject, startTime } = req.body || {};
     if (!bookingId || !studentEmail) return res.status(400).json({ error: 'bookingId and studentEmail required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
 
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
@@ -259,6 +261,7 @@ module.exports = async (req, res) => {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
     const { bookingId } = req.query;
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
     try {
       const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
@@ -306,6 +309,7 @@ module.exports = async (req, res) => {
       sid = students[0]?.id;
     }
     if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
+    if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
     try {
       let path = `/progress_history?student_id=eq.${sid}&order=created_at.asc`;
       if (subject) path += `&subject=eq.${encodeURIComponent(subject)}`;
@@ -318,6 +322,7 @@ module.exports = async (req, res) => {
     const { leadId, adminNotes } = req.body || {};
     if (req.method === 'POST') {
       if (!leadId) return res.status(400).json({ error: 'leadId required' });
+      if (!isValidId(leadId)) return res.status(400).json({ error: 'Invalid leadId' });
       try {
         const r = await supabaseRequest(`/leads?id=eq.${leadId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -333,6 +338,7 @@ module.exports = async (req, res) => {
   if (resource === 'invoice') {
     const { bookingId } = req.query;
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
     try {
       const bookings = await dbGet(`/bookings?id=eq.${bookingId}&select=*,students(student_name,parent_name,parent_email)&limit=1`);
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
@@ -477,6 +483,7 @@ module.exports = async (req, res) => {
         sid = students[0].id;
       }
       if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
+      if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
 
       let order = 'created_at.desc';
       if (resource === 'progress') order = 'updated_at.desc';
@@ -618,7 +625,7 @@ module.exports = async (req, res) => {
           const senderRole = body.senderRole;
           const studentId = body.studentId;
           // Find student email
-          const students = await dbGet(`/students?id=eq.${studentId}&limit=1`);
+          const students = isValidId(studentId) ? await dbGet(`/students?id=eq.${studentId}&limit=1`) : [];
           const studentEmail = students[0]?.parent_email;
           const studentName = students[0]?.student_name || 'Student';
           const portalUrl = body.portalUrl || null;
@@ -659,6 +666,7 @@ module.exports = async (req, res) => {
     if (req.method === 'PATCH') {
       const { id } = req.body || {};
       if (!id) return res.status(400).json({ error: 'id required' });
+      if (!isValidId(id)) return res.status(400).json({ error: 'Invalid id' });
       const updates = {};
       if (resource === 'homework') {
         if (typeof req.body.completed === 'boolean') {

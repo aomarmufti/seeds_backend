@@ -1,6 +1,7 @@
 // api/analytics.js — GET /api/analytics
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
+const { isValidId } = require('../lib/validate');
 
 const TUTOR_CUT = 0.78;
 
@@ -12,6 +13,7 @@ module.exports = async (req, res) => {
     const { action, bookingId, newStartTime } = req.body || {};
     if (action === 'cancel-booking') {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+      if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
       try {
         const { supabaseRequest, dbGet } = require('../lib/db');
 
@@ -45,6 +47,7 @@ module.exports = async (req, res) => {
     }
     if (action === 'reschedule-booking') {
       if (!bookingId || !newStartTime) return res.status(400).json({ error: 'bookingId and newStartTime required' });
+      if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
       try {
         const { supabaseRequest } = require('../lib/db');
         const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
