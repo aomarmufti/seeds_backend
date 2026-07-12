@@ -4,6 +4,7 @@ const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
+const { escapeHtml } = require('../lib/escapeHtml');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -350,18 +351,18 @@ module.exports = async (req, res) => {
       .footer{margin-top:30px;font-size:12px;color:#A7A7A7;text-align:center}
       @media print{body{margin:0}}</style></head>
       <body>
-        <div class="header"><h1>Seeds Tuition</h1><p>Receipt #${bookingId.slice(0,8).toUpperCase()}</p></div>
+        <div class="header"><h1>Seeds Tuition</h1><p>Receipt #${escapeHtml(bookingId.slice(0,8).toUpperCase())}</p></div>
         <table>
-          <tr><td>Student</td><td>${b.students?.student_name||'—'}</td></tr>
-          <tr><td>Parent / billed to</td><td>${b.students?.parent_name||b.students?.student_name||'—'}</td></tr>
+          <tr><td>Student</td><td>${escapeHtml(b.students?.student_name)||'—'}</td></tr>
+          <tr><td>Parent / billed to</td><td>${escapeHtml(b.students?.parent_name||b.students?.student_name)||'—'}</td></tr>
           <tr><td>Date</td><td>${date}</td></tr>
-          <tr><td>Tutor</td><td>${b.tutor_name}</td></tr>
-          <tr><td>Subject</td><td>${b.subject||'—'}</td></tr>
-          <tr><td>Type</td><td>${typeLabel}</td></tr>
+          <tr><td>Tutor</td><td>${escapeHtml(b.tutor_name)}</td></tr>
+          <tr><td>Subject</td><td>${escapeHtml(b.subject)||'—'}</td></tr>
+          <tr><td>Type</td><td>${escapeHtml(typeLabel)}</td></tr>
           <tr><td>Duration</td><td>${b.duration_mins||55} minutes</td></tr>
           <tr class="total"><td>Amount paid</td><td>&pound;${((b.fee_pence||0)/100).toFixed(2)}</td></tr>
         </table>
-        ${b.stripe_payment_intent_id?`<p style="font-size:12px;color:#718096">Payment reference: ${b.stripe_payment_intent_id}</p>`:''}
+        ${b.stripe_payment_intent_id?`<p style="font-size:12px;color:#718096">Payment reference: ${escapeHtml(b.stripe_payment_intent_id)}</p>`:''}
         <div class="footer">Seeds Tuition &bull; seedstuition.co.uk &bull; Thank you for choosing Seeds</div>
         <script>window.print();</script>
       </body></html>`;
@@ -399,7 +400,7 @@ module.exports = async (req, res) => {
       @media print{body{margin:0}}</style></head>
       <body>
         <h1>Seeds Tuition — Earnings Statement</h1>
-        <p><strong>Tutor:</strong> ${tutorName}<br>
+        <p><strong>Tutor:</strong> ${escapeHtml(tutorName)}<br>
         <strong>Tax year:</strong> 6 April ${startY||new Date().getFullYear()-1} to 5 April ${startY?parseInt(startY)+1:new Date().getFullYear()}</p>
         <div class="summary">
           <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span>Total lessons delivered</span><strong>${bookings.length}</strong></div>
