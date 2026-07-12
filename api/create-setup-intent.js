@@ -4,6 +4,7 @@
 // and charged automatically per lesson (direct-debit-style billing).
 
 const { applyCors } = require('../lib/cors');
+const { getPaymentService } = require('../lib/payments');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -12,12 +13,12 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Initialise Stripe inside the handler — if the key is missing,
-  // this endpoint fails cleanly instead of crashing the whole server.
-  if (!process.env.STRIPE_SECRET_KEY) {
-    return res.status(500).json({ error: 'Stripe is not configured (STRIPE_SECRET_KEY missing)' });
+  let payments;
+  try {
+    payments = getPaymentService();
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
-  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
   try {
     const { parentName, parentEmail, parentPhone } = req.body || {};
@@ -26,16 +27,10 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Email is required' });
     }
 
-    // Get or create the customer (avoid duplicates by email)
-    const existing = await stripe.customers.list({ email: parentEmail, limit: 1 });
-    const customer = existing.data.length > 0
-      ? existing.data[0]
-      : await stripe.customers.create({ email: parentEmail, name: parentName, phone: parentPhone });
+    const customer = await payments.createCustomer({ email: parentEmail, name: parentName, phone: parentPhone });
 
-    const setupIntent = await stripe.setupIntents.create({
-      customer: customer.id,
-      payment_method_types: ['card'],
-      usage: 'off_session', // allows charging later without the customer present
+    const setupIntent = await payments.createSetupIntent({
+      customerId: customer.id,
       metadata: { parentName: parentName || '', parentEmail, parentPhone: parentPhone || '' },
     });
 

@@ -5,6 +5,7 @@
 
 const { applyCors } = require('../lib/cors');
 const { resolvePrice } = require('../lib/pricing');
+const { getPaymentService } = require('../lib/payments');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -13,10 +14,12 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  if (!process.env.STRIPE_SECRET_KEY) {
-    return res.status(500).json({ error: 'Stripe is not configured (STRIPE_SECRET_KEY missing)' });
+  let payments;
+  try {
+    payments = getPaymentService();
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
-  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
   try {
     const {
@@ -32,15 +35,15 @@ module.exports = async (req, res) => {
       return res.status(200).json({ status: 'free', amount: 0 });
     }
 
-    const paymentIntent = await stripe.paymentIntents.create({
+    const paymentIntent = await payments.createPaymentIntent({
       amount: pricing.amount,
       currency: pricing.currency,
-      customer: customerId,
-      payment_method: paymentMethodId,
+      customerId,
+      paymentMethodId,
       confirm: true,
-      off_session: true,
+      offSession: true,
       description: `${pricing.label} — ${studentName} — ${tutorName}`,
-      receipt_email: parentEmail,
+      receiptEmail: parentEmail,
       metadata: {
         lessonType, studentLevel: studentLevel || '',
         studentName: studentName || '', tutorName: tutorName || '',

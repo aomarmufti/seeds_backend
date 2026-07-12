@@ -5,6 +5,7 @@
 // so we disable body parsing for this route via the config export below.
 
 const getRawBody = require('raw-body');
+const { getPaymentService } = require('../lib/payments');
 
 // Tell Vercel NOT to parse the body — Stripe needs it raw to verify the signature
 module.exports.config = {
@@ -16,16 +17,18 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
+  let payments;
+  try {
+    payments = getPaymentService();
+  } catch (err) {
     return res.status(500).json({ error: 'Stripe webhook not configured' });
   }
-  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
   let event;
   try {
     const rawBody = await getRawBody(req);
     const sig = req.headers['stripe-signature'];
-    event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = payments.constructWebhookEvent(rawBody, sig);
   } catch (err) {
     console.error('Webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -68,9 +71,12 @@ module.exports = async (req, res) => {
       break;
     }
     case 'checkout.session.completed': {
-      // Student paid via payment link
+      // Student paid via Stripe Checkout (either the legacy payment-link
+      // flow or the Calendly-scheduled-then-pay flow — both set
+      // metadata.bookingId when creating the session).
       const session = event.data.object;
       if (session.metadata && session.metadata.bookingId) {
+        const { dbGet } = require('../lib/db');
         await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({
@@ -80,12 +86,58 @@ module.exports = async (req, res) => {
           }),
         });
         console.log(`✅ Checkout paid: booking ${session.metadata.bookingId}`);
+
+        try {
+          const rows = await dbGet(
+            `/bookings?id=eq.${session.metadata.bookingId}&select=*,students(student_name,parent_name,parent_email,parent_phone)`
+          );
+          const booking = rows[0];
+          if (booking && booking.students) {
+            const { sendBookingConfirmation } = require('../lib/reminders');
+            await sendBookingConfirmation({
+              studentName: booking.students.student_name,
+              parentName: booking.students.parent_name,
+              parentEmail: booking.students.parent_email,
+              parentPhone: booking.students.parent_phone,
+              tutorName: booking.tutor_name,
+              subject: booking.subject,
+              lessonType: booking.lesson_type,
+              startTime: booking.start_time,
+              durationMins: booking.duration_mins,
+              meetingLink: booking.meet_link,
+              amountPence: booking.fee_pence,
+              paymentIntentId: session.payment_intent,
+            });
+          }
+        } catch (emailErr) {
+          // Booking is confirmed and paid regardless of whether the email
+          // sends — don't fail the webhook (Stripe would just retry it).
+          console.error('Booking confirmation email failed:', emailErr.message);
+        }
+      }
+      break;
+    }
+    case 'checkout.session.expired': {
+      // Student didn't complete payment within the session's time limit.
+      const session = event.data.object;
+      if (session.metadata && session.metadata.bookingId) {
+        await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}&status=eq.scheduled`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ status: 'payment_failed' }),
+        });
+        console.warn(`⌛ Checkout session expired unpaid: booking ${session.metadata.bookingId}`);
       }
       break;
     }
     case 'payment_intent.payment_failed': {
       const pi = event.data.object;
       console.error(`❌ Payment failed: ${pi.id} — ${pi.last_payment_error?.message}`);
+      if (pi.metadata && pi.metadata.bookingId) {
+        await supabaseRequest(`/bookings?id=eq.${pi.metadata.bookingId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ status: 'payment_failed' }),
+        });
+      }
       break;
     }
     case 'setup_intent.succeeded': {

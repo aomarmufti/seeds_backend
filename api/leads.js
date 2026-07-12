@@ -167,14 +167,34 @@ module.exports = async (req, res) => {
         try {
           const { sendTutorAssigned } = require('../lib/reminders');
           const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(updates.assigned_tutor)}&limit=1`);
-          const tutorEmail = profiles[0]?.email;
-          if (tutorEmail) {
+          const tutorProfile = profiles[0];
+          if (tutorProfile?.email) {
             await sendTutorAssigned({
-              tutorEmail, tutorName: updates.assigned_tutor,
+              tutorEmail: tutorProfile.email, tutorName: updates.assigned_tutor,
               studentName: lead.name || 'A new student',
               subject: lead.subject || '', level: lead.level || '',
               goal: lead.goal || '', availability: lead.availability || [],
             });
+          }
+
+          // "Calendly Booking" step: if this tutor has a Calendly event
+          // type configured, send the family a single-use scheduling
+          // link straight away instead of waiting for the tutor to
+          // manually propose slots. Tutors without Calendly set up yet
+          // keep using the manual propose-slots flow below unaffected.
+          if (tutorProfile?.calendly_event_type_uri) {
+            try {
+              const { createSchedulingLink } = require('../lib/calendly');
+              const { sendCalendlyBookingLink } = require('../lib/reminders');
+              const url = await createSchedulingLink({
+                eventTypeUri: tutorProfile.calendly_event_type_uri,
+                trackingId: lead.id,
+              });
+              await sendCalendlyBookingLink({
+                parentName: lead.name, parentEmail: lead.email,
+                tutorName: updates.assigned_tutor, subject: lead.subject, schedulingUrl: url,
+              });
+            } catch(calendlyErr) { console.warn('Calendly scheduling link failed:', calendlyErr.message); }
           }
         } catch(emailErr) { console.warn('Tutor assigned email failed:', emailErr.message); }
       }
