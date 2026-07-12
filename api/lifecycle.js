@@ -454,7 +454,11 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  const validResources = ['notes', 'homework', 'progress', 'messages'];
+  // 'messages' (in-platform chat) disabled for now — pulled out at the
+  // product owner's request pending a simpler approach. The resource-
+  // specific branches below are left in place so re-adding 'messages'
+  // here is the only step needed to bring it back.
+  const validResources = ['notes', 'homework', 'progress'];
   if (!validResources.includes(resource)) {
     return res.status(400).json({ error: 'Invalid resource' });
   }
