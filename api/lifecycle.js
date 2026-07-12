@@ -322,6 +322,7 @@ module.exports = async (req, res) => {
   if (resource === 'lead-notes') {
     const { leadId, adminNotes } = req.body || {};
     if (req.method === 'POST') {
+      if (!(await requireAdmin(req, res))) return;
       if (!leadId) return res.status(400).json({ error: 'leadId required' });
       if (!isValidId(leadId)) return res.status(400).json({ error: 'Invalid leadId' });
       try {
