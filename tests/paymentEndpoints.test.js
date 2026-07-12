@@ -20,54 +20,63 @@ function makeRes() {
   return res;
 }
 
-test('GET payment-methods returns a simplified card list', async () => {
+test('GET billing?resource=payment-methods returns a simplified card list', async () => {
   mockPaymentsModule({ listPaymentMethods: async () => [{ id: 'pm_1', card: { brand: 'visa', last4: '4242', exp_month: 8, exp_year: 2030 } }] });
   mockCors();
-  const handler = require(path.join(backendRoot, 'api/payment-methods.js'));
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
-  await handler({ method: 'GET', query: { customerId: 'cus_1' } }, res);
+  await handler({ method: 'GET', query: { resource: 'payment-methods', customerId: 'cus_1' } }, res);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, [{ id: 'pm_1', brand: 'visa', last4: '4242', expMonth: 8, expYear: 2030 }]);
 });
 
-test('GET payment-methods requires a customerId', async () => {
+test('GET billing?resource=payment-methods requires a customerId', async () => {
   mockPaymentsModule({});
   mockCors();
-  const handler = require(path.join(backendRoot, 'api/payment-methods.js'));
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
-  await handler({ method: 'GET', query: {} }, res);
+  await handler({ method: 'GET', query: { resource: 'payment-methods' } }, res);
   assert.equal(res.statusCode, 400);
 });
 
-test('POST payment-methods detach removes a saved card', async () => {
+test('POST billing payment-methods detach removes a saved card', async () => {
   let detached = null;
   mockPaymentsModule({ detachPaymentMethod: async (id) => { detached = id; } });
   mockCors();
-  const handler = require(path.join(backendRoot, 'api/payment-methods.js'));
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
-  await handler({ method: 'POST', body: { action: 'detach', paymentMethodId: 'pm_1' } }, res);
+  await handler({ method: 'POST', body: { resource: 'payment-methods', action: 'detach', paymentMethodId: 'pm_1' } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(detached, 'pm_1');
 });
 
-test('customer-portal creates a session and returns its url', async () => {
+test('POST billing customer-portal creates a session and returns its url', async () => {
   let captured;
   mockPaymentsModule({ createCustomerPortalSession: async (params) => { captured = params; return { url: 'https://billing.stripe.com/p/session_1' }; } });
   mockCors();
-  const handler = require(path.join(backendRoot, 'api/customer-portal.js'));
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
-  await handler({ method: 'POST', body: { customerId: 'cus_1', returnUrl: 'https://example.com/account' } }, res);
+  await handler({ method: 'POST', body: { resource: 'customer-portal', customerId: 'cus_1', returnUrl: 'https://example.com/account' } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.url, 'https://billing.stripe.com/p/session_1');
   assert.equal(captured.customerId, 'cus_1');
 });
 
-test('customer-portal requires a customerId', async () => {
+test('POST billing customer-portal requires a customerId', async () => {
   mockPaymentsModule({});
   mockCors();
-  const handler = require(path.join(backendRoot, 'api/customer-portal.js'));
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
-  await handler({ method: 'POST', body: {} }, res);
+  await handler({ method: 'POST', body: { resource: 'customer-portal' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('POST billing rejects an unknown resource', async () => {
+  mockPaymentsModule({});
+  mockCors();
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'not-a-real-resource' } }, res);
   assert.equal(res.statusCode, 400);
 });
 

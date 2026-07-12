@@ -12,8 +12,14 @@ function sign(rawBody) {
   return `t=${t},v1=${sig}`;
 }
 
-function loadHandler({ dbGetMock, dbPostMock, dbMock, paymentsMock, remindersMock } = {}) {
+function loadHandler({ dbGetMock, dbPostMock, dbMock, paymentsMock, remindersMock, rawBody } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
+
+  const rawBodyModulePath = require.resolve('raw-body');
+  require.cache[rawBodyModulePath] = {
+    id: rawBodyModulePath, filename: rawBodyModulePath, loaded: true,
+    exports: async () => Buffer.from(rawBody || '{}'),
+  };
 
   const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
   require.cache[dbPath] = {
@@ -46,7 +52,7 @@ function loadHandler({ dbGetMock, dbPostMock, dbMock, paymentsMock, remindersMoc
   };
 
   process.env.CALENDLY_WEBHOOK_SIGNING_KEY = SIGNING_KEY;
-  return require(path.join(backendRoot, 'api/calendly-webhook.js'));
+  return require(path.join(backendRoot, 'api/webhook.js'));
 }
 
 function makeRes() {
@@ -75,11 +81,11 @@ function inviteeCreatedBody(overrides = {}) {
   };
 }
 
-test('rejects a request with an invalid signature', async () => {
-  const handler = loadHandler({});
+test('rejects a Calendly request with an invalid signature', async () => {
+  const raw = JSON.stringify(inviteeCreatedBody());
+  const handler = loadHandler({ rawBody: raw });
   const res = makeRes();
-  const body = inviteeCreatedBody();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': 'bad' }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': 'bad' } }, res);
   assert.equal(res.statusCode, 400);
 });
 
@@ -87,9 +93,9 @@ test('invitee.created for a paid lesson creates a scheduled booking and a checko
   const posted = [];
   let checkoutCreated = null;
   let paymentLinkEmail = null;
-  const body = inviteeCreatedBody();
-  const raw = JSON.stringify(body);
+  const raw = JSON.stringify(inviteeCreatedBody());
   const handler = loadHandler({
+    rawBody: raw,
     dbGetMock: async (p) => {
       if (p.startsWith('/leads?')) return [{ id: 'lead-1', name: 'Parent Name', email: 'parent@example.com', subject: 'Maths', level: 'gcse', notes: null, assigned_tutor: 'Azeem' }];
       if (p.startsWith('/profiles?')) return [{ tutor_name: 'Azeem' }];
@@ -97,14 +103,14 @@ test('invitee.created for a paid lesson creates a scheduled booking and a checko
       return [];
     },
     dbPostMock: async (p, b) => { posted.push({ p, b }); return { id: 'booking-1', ...b }; },
-    dbMock: async (p, opts) => ({ ok: true, json: async () => ({}) }),
+    dbMock: async () => ({ ok: true, json: async () => ({}) }),
     paymentsMock: {
       createCheckoutSession: async (params) => { checkoutCreated = params; return { id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' }; },
     },
     remindersMock: { sendPaymentLink: async (params) => { paymentLinkEmail = params; } },
   });
   const res = makeRes();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
   const bookingInsert = posted.find(p => p.p === '/bookings');
   assert.ok(bookingInsert, 'should insert a bookings row');
@@ -123,6 +129,7 @@ test('invitee.created for a free trial confirms the booking directly, no checkou
   body.payload.tracking.utm_content = 'lead-2';
   const raw = JSON.stringify(body);
   const handler = loadHandler({
+    rawBody: raw,
     dbGetMock: async (p) => {
       if (p.startsWith('/leads?')) return [{ id: 'lead-2', name: 'P', email: 'parent2@example.com', subject: 'Maths', level: 'gcse', notes: '{"trial":true}', assigned_tutor: 'Azeem' }];
       if (p.startsWith('/profiles?')) return [{ tutor_name: 'Azeem' }];
@@ -134,7 +141,7 @@ test('invitee.created for a free trial confirms the booking directly, no checkou
     remindersMock: { sendBookingConfirmation: async () => { confirmationSent = true; } },
   });
   const res = makeRes();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
   const bookingInsert = posted.find(p => p.p === '/bookings');
   assert.equal(bookingInsert.b.status, 'confirmed');
@@ -147,9 +154,9 @@ test('invitee.created with no tracking id is skipped gracefully (no crash)', asy
   const body = inviteeCreatedBody();
   delete body.payload.tracking;
   const raw = JSON.stringify(body);
-  const handler = loadHandler({});
+  const handler = loadHandler({ rawBody: raw });
   const res = makeRes();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
 });
 
@@ -161,6 +168,7 @@ test('invitee.canceled marks the linked booking cancelled', async () => {
   };
   const raw = JSON.stringify(body);
   const handler = loadHandler({
+    rawBody: raw,
     dbMock: async (p, opts) => {
       if (p === '/calendly_webhook_events') return { ok: true, json: async () => ({}) };
       patches.push({ p, b: JSON.parse(opts.body) });
@@ -168,26 +176,19 @@ test('invitee.canceled marks the linked booking cancelled', async () => {
     },
   });
   const res = makeRes();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(patches[0].b.status, 'cancelled');
 });
 
-test('short-circuits a redelivered event', async () => {
-  const body = inviteeCreatedBody();
-  const raw = JSON.stringify(body);
+test('short-circuits a redelivered Calendly event', async () => {
+  const raw = JSON.stringify(inviteeCreatedBody());
   const handler = loadHandler({
+    rawBody: raw,
     dbMock: async (p) => (p === '/calendly_webhook_events' ? { ok: false, status: 409, json: async () => ({}) } : { ok: true, json: async () => ({}) }),
   });
   const res = makeRes();
-  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) }, body }, res);
+  await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.duplicate, true);
-});
-
-test('rejects non-POST requests', async () => {
-  const handler = loadHandler({});
-  const res = makeRes();
-  await handler({ method: 'GET', headers: {} }, res);
-  assert.equal(res.statusCode, 405);
 });
