@@ -2,10 +2,15 @@
 // Routes by action: create-student | approve-student | invite-tutor | create-tutor
 const { applyCors } = require('../lib/cors');
 const { supabaseRequest } = require('../lib/db');
+const { requireAdmin } = require('../lib/auth');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // Every action here (creating/editing/deactivating accounts, bulk email)
+  // is an admin-only operation.
+  if (!(await requireAdmin(req, res))) return;
 
   const { action } = req.body || {};
 

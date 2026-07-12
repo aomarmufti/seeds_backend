@@ -2,14 +2,16 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
 const { isValidId } = require('../lib/validate');
+const { requireAdmin } = require('../lib/auth');
 
 const TUTOR_CUT = 0.78;
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
 
-  // ── POST: booking management (cancel / reschedule) ────────────────────
+  // ── POST: booking management (cancel / reschedule) — admin only ───────
   if (req.method === 'POST') {
+    if (!(await requireAdmin(req, res))) return;
     const { action, bookingId, newStartTime } = req.body || {};
     if (action === 'cancel-booking') {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
@@ -63,7 +65,10 @@ module.exports = async (req, res) => {
 
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  // ?resource=students returns the full students list with bookings
+  // ?resource=students is used by the student/tutor portals for their own
+  // data as well as the admin panel, so it stays open to any authenticated
+  // request rather than admin-only (tightening this further needs the
+  // caller's own student/tutor identity threaded through, tracked separately).
   if (req.query.resource === 'students') {
     try {
       const data = await dbGet(
@@ -77,6 +82,7 @@ module.exports = async (req, res) => {
 
   // Pending student signups (read via service key so profiles can be locked down)
   if (req.query.resource === 'pending-profiles') {
+    if (!(await requireAdmin(req, res))) return;
     try {
       const data = await dbGet(
         '/profiles?role=eq.pending&select=id,full_name,email,subject,level,created_at&order=created_at.desc'
@@ -86,6 +92,9 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: err.message });
     }
   }
+
+  // Default (no resource param): full revenue/PII dashboard payload — admin only.
+  if (!(await requireAdmin(req, res))) return;
 
   try {
     const [bookings, students, payouts] = await Promise.all([
