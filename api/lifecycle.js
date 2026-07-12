@@ -6,6 +6,7 @@ const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
 const { isValidId } = require('../lib/validate');
+const { requireAdmin } = require('../lib/auth');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -434,6 +435,7 @@ module.exports = async (req, res) => {
   // ── BULK CANCEL (admin cancels all lessons on a date/by tutor) ────────
   if (resource === 'bulk-cancel') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    if (!(await requireAdmin(req, res))) return;
     const { tutorName, date, reason } = req.body || {};
     if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
     try {
