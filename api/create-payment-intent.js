@@ -32,6 +32,10 @@ module.exports = async (req, res) => {
       return res.status(200).json({ status: 'free', amount: 0 });
     }
 
+    // Deterministic per logical charge attempt, so a client retry (network
+    // blip, double-click) reuses the same PaymentIntent instead of charging twice.
+    const idempotencyKey = `charge:${customerId}:${paymentMethodId}:${tutorName}:${subject}:${lessonDate}:${lessonType}`;
+
     const paymentIntent = await stripe.paymentIntents.create({
       amount: pricing.amount,
       currency: pricing.currency,
@@ -46,7 +50,7 @@ module.exports = async (req, res) => {
         studentName: studentName || '', tutorName: tutorName || '',
         subject: subject || '', lessonDate: lessonDate || '',
       },
-    });
+    }, { idempotencyKey });
 
     res.status(200).json({
       status: paymentIntent.status,

@@ -30,11 +30,12 @@ module.exports = async (req, res) => {
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
         if (amount < 5000) { results.push({ tutor: acct.tutor_name, status: 'below_minimum', amount }); continue; }
         try {
+          const payoutWeek = new Date().toISOString().slice(0,10);
           const transfer = await stripe.transfers.create({
             amount, currency: 'gbp',
             destination: acct.stripe_account_id,
-            description: `Seeds weekly payout — ${acct.tutor_name} — ${new Date().toISOString().slice(0,10)}`,
-          });
+            description: `Seeds weekly payout — ${acct.tutor_name} — ${payoutWeek}`,
+          }, { idempotencyKey: `auto-payout:${acct.tutor_name}:${payoutWeek}` });
           await supabaseRequest(
             `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`,
             { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
@@ -167,7 +168,7 @@ module.exports = async (req, res) => {
           description: `${pricing.label} — ${studentName} — ${tutorName}`,
           receipt_email: studentEmail,
           metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
-        });
+        }, { idempotencyKey: `booking-charge:${bookingId}` });
         // Update booking with payment intent
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -200,7 +201,7 @@ module.exports = async (req, res) => {
           metadata: { bookingId, studentEmail },
           success_url: `${origin}?payment=success`,
           cancel_url: `${origin}?payment=cancelled`,
-        });
+        }, { idempotencyKey: `booking-payment-link:${bookingId}` });
         // Mark booking as payment_pending
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',

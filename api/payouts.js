@@ -129,12 +129,13 @@ module.exports = async (req, res) => {
         let transferId = null, transferStatus = 'manual';
         const acct = await getTutorAccount(tutorName);
         if (stripe && acct && acct.stripe_account_id && acct.onboarding_complete && body.amountPence >= 5000) {
+          const payoutDay = new Date().toISOString().slice(0,10);
           const transfer = await stripe.transfers.create({
             amount: body.amountPence, currency: 'gbp',
             destination: acct.stripe_account_id,
             description: `Seeds payout — ${tutorName}`,
             metadata: { tutorName },
-          });
+          }, { idempotencyKey: `manual-payout:${tutorName}:${body.amountPence}:${payoutDay}` });
           transferId = transfer.id; transferStatus = 'paid';
 
           // Notify tutor their payment has landed
