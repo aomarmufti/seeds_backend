@@ -106,6 +106,12 @@ module.exports = async (req, res) => {
 
         return res.status(201).json({ success: true, booking, meetingLink });
       } catch(e) {
+        if (e.message.includes('bookings_no_tutor_overlap')) {
+          return res.status(409).json({ error: 'That slot was just taken. Please choose a different time.', conflict: true });
+        }
+        if (e.message.includes('bookings_one_trial_per_student')) {
+          return res.status(409).json({ error: 'This student has already used their free trial lesson.', conflict: true });
+        }
         return res.status(500).json({ error: e.message });
       }
     }

@@ -53,7 +53,12 @@ module.exports = async (req, res) => {
         });
         if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
         return res.status(200).json({ success: true });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
+      } catch(e) {
+        if (e.message.includes('bookings_no_tutor_overlap')) {
+          return res.status(409).json({ error: 'That tutor is already booked at the new time. Please choose a different slot.', conflict: true });
+        }
+        return res.status(500).json({ error: e.message });
+      }
     }
     return res.status(400).json({ error: 'Unknown action' });
   }
