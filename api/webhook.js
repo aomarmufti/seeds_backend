@@ -33,6 +33,27 @@ module.exports = async (req, res) => {
 
   const { supabaseRequest } = require('../lib/db');
 
+  // Idempotency: Stripe can and does redeliver the same event. Record the
+  // event id first; a unique-constraint conflict means we've already
+  // processed it, so skip re-running side effects.
+  try {
+    const dedupRes = await supabaseRequest('/stripe_webhook_events', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: JSON.stringify({ event_id: event.id, event_type: event.type }),
+    });
+    if (!dedupRes.ok) {
+      if (dedupRes.status === 409) {
+        return res.status(200).json({ received: true, duplicate: true });
+      }
+      const errBody = await dedupRes.json().catch(() => ({}));
+      throw new Error(errBody.message || `Dedup insert failed with status ${dedupRes.status}`);
+    }
+  } catch (err) {
+    console.error('Webhook dedup check failed:', err.message);
+    return res.status(500).json({ error: 'Webhook dedup check failed' });
+  }
+
   switch (event.type) {
     case 'payment_intent.succeeded': {
       const pi = event.data.object;
