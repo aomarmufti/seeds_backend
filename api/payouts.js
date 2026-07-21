@@ -1,6 +1,7 @@
 // api/payouts.js — payouts + Stripe Connect for real tutor payments
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
+const { requireAdmin } = require('../lib/auth');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -120,6 +121,9 @@ module.exports = async (req, res) => {
     }
 
     if (action === 'approve-and-transfer' || body.markPaid) {
+      // The only caller is the admin panel's "Approve & mark paid" — this
+      // moves real money via Stripe transfer.
+      if (!(await requireAdmin(req, res))) return;
       const stripe = getStripe();
       try {
         await supabaseRequest(
@@ -129,12 +133,13 @@ module.exports = async (req, res) => {
         let transferId = null, transferStatus = 'manual';
         const acct = await getTutorAccount(tutorName);
         if (stripe && acct && acct.stripe_account_id && acct.onboarding_complete && body.amountPence >= 5000) {
+          const payoutDay = new Date().toISOString().slice(0,10);
           const transfer = await stripe.transfers.create({
             amount: body.amountPence, currency: 'gbp',
             destination: acct.stripe_account_id,
             description: `Seeds payout — ${tutorName}`,
             metadata: { tutorName },
-          });
+          }, { idempotencyKey: `manual-payout:${tutorName}:${body.amountPence}:${payoutDay}` });
           transferId = transfer.id; transferStatus = 'paid';
 
           // Notify tutor their payment has landed

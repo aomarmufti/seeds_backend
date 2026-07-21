@@ -3,6 +3,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
+const { isValidId } = require('../lib/validate');
 
 function getMeetingLink(tutorName) {
   const links = {
@@ -38,6 +39,7 @@ module.exports = async (req, res) => {
     if (action === 'select-slot') {
       const { leadId, chosenSlot } = req.body;
       if (!leadId || !chosenSlot) return res.status(400).json({ error: 'leadId and chosenSlot required' });
+      if (!isValidId(leadId)) return res.status(400).json({ error: 'Invalid leadId' });
       try {
         // Fetch the lead
         const leads = await dbGet(`/leads?id=eq.${leadId}&limit=1`);
@@ -143,6 +145,7 @@ module.exports = async (req, res) => {
   if (req.method === 'PATCH') {
     const { id, status, assignedTutor, notes } = req.body || {};
     if (!id) return res.status(400).json({ error: 'Missing lead id' });
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid lead id' });
     const updates = {};
     if (status)        updates.status = status;
     if (assignedTutor) updates.assigned_tutor = assignedTutor;

@@ -2,14 +2,19 @@
 // Routes by action: create-student | approve-student | invite-tutor | create-tutor
 const { applyCors } = require('../lib/cors');
 const { supabaseRequest } = require('../lib/db');
+const { requireAdmin } = require('../lib/auth');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+  // Every action here (creating/editing/deactivating accounts, bulk email)
+  // is an admin-only operation.
+  if (!(await requireAdmin(req, res))) return;
+
   const { action } = req.body || {};
 
-  // ── CREATE STUDENT ────────────────────────────────────────────────────
+  // ── CREATE STUDENT ────────────────────────
   if (action === 'create-student') {
     const { fullName, email, subject, level, assignedTutor } = req.body;
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
@@ -30,7 +35,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── APPROVE STUDENT ───────────────────────────────────────────────────
+  // ── APPROVE STUDENT ────────────────────
   if (action === 'approve-student') {
     const { userId, assignedTutor } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -44,7 +49,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── INVITE TUTOR (sends magic link, account created on signup) ────────
+  // ── INVITE TUTOR (sends magic link, account created on signup) ─────
   if (action === 'invite-tutor') {
     const { fullName, email, subjects } = req.body;
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
@@ -67,7 +72,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── CREATE TUTOR DIRECTLY ─────────────────────────────────────────────
+  // ── CREATE TUTOR DIRECTLY ─────────────────
   if (action === 'create-tutor') {
     const { fullName, email, tutorName, subjects } = req.body;
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
@@ -88,9 +93,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  return res.status(400).json({ error: 'Unknown action: ' + action });
-
-  // ── EDIT STUDENT ──────────────────────────────────────────────────────
+  // ── EDIT STUDENT ────────────────────
   if (action === 'edit-student') {
     const { userId, fullName, subject, level, assignedTutor } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -108,7 +111,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── EDIT TUTOR ────────────────────────────────────────────────────────
+  // ── EDIT TUTOR ───────────────────
   if (action === 'edit-tutor') {
     const { userId, fullName, tutorName, email } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -130,7 +133,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── DEACTIVATE TUTOR ──────────────────────────────────────────────────
+  // ── DEACTIVATE TUTOR ─────────────────
   if (action === 'deactivate-tutor') {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -147,7 +150,7 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── BULK EMAIL (announcement) ─────────────────────────────────────────
+  // ── BULK EMAIL (announcement) ─────────────────
   if (action === 'bulk-email') {
     const { subject: emailSubject, body: emailBody, to } = req.body;
     // to: 'all-students' | 'all-tutors' | 'all'
@@ -193,4 +196,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, sent, total: emails.length });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
+
+  return res.status(400).json({ error: 'Unknown action: ' + action });
 };

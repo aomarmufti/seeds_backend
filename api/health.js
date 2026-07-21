@@ -2,9 +2,11 @@
 // Visit https://seeds-backend-six.vercel.app/api/health for a complete status report
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
+const { requireAdmin } = require('../lib/auth');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   const report = { time: new Date().toISOString(), env: {}, database: {}, stripe: {}, email: {} };
 
@@ -52,17 +54,10 @@ module.exports = async (req, res) => {
     ? '⚠ Using onboarding@resend.dev — Resend TEST mode can ONLY send to the email address that owns the Resend account. To email real students/parents, verify a domain in Resend and change EMAIL_FROM.'
     : `✓ sending from ${process.env.EMAIL_FROM}`;
 
-  // 5. RLS status check
-  try {
-    const rlsResult = await dbGet('/students?limit=0&select=id');
-    report.security = { rls: '⚠ Tables accessible — run seeds-rls-hardening.sql to lock down' };
-  } catch(e) {
-    if (e.message && e.message.includes('permission')) {
-      report.security = { rls: '✓ RLS active — tables locked to service key only' };
-    } else {
-      report.security = { rls: `Unknown: ${e.message.slice(0,60)}` };
-    }
-  }
+  // 5. RLS status note — this check always used the service key, which bypasses
+  // RLS by design, so it could never actually detect a misconfiguration. Removed
+  // the misleading self-check; verify RLS via Supabase Dashboard → Advisors instead.
+  report.security = { rls: 'Not checked here — this endpoint uses the service key, which bypasses RLS. Verify via Supabase Dashboard → Advisors.' };
 
   const problems = [
     ...Object.values(report.env), ...Object.values(report.database),
