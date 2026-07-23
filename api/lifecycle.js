@@ -1,4 +1,4 @@
-// api/lifecycle.js — CRUD for lesson_notes, homework, progress, messages, lessons, payments
+// api/lifecycle.js — CRUD for lesson_notes, homework, progress, lessons, payments
 // Routes by ?resource= and HTTP method
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
@@ -469,10 +469,9 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // 'messages' (in-platform chat) disabled for now — pulled out at the
-  // product owner's request pending a simpler approach. The resource-
-  // specific branches below are left in place so re-adding 'messages'
-  // here is the only step needed to bring it back.
+  // In-platform messaging was removed entirely (SCRUM-49/SCRUM-55) —
+  // replaced with direct email/WhatsApp contact between parent and tutor,
+  // not built or stored on the platform.
   const validResources = ['notes', 'homework', 'progress'];
   if (!validResources.includes(resource)) {
     return res.status(400).json({ error: 'Invalid resource' });
@@ -587,13 +586,6 @@ module.exports = async (req, res) => {
         }
 
         return res.status(201).json({ success: true, record: data[0] });
-      } else if (resource === 'messages') {
-        record = {
-          student_id: body.studentId,
-          sender_role: body.senderRole,
-          sender_name: body.senderName || null,
-          body: body.body,
-        };
       }
 
       const created = await dbPost(`/${table}`, record);
@@ -628,45 +620,6 @@ module.exports = async (req, res) => {
           }
         } catch(emailErr) { console.warn('Homework email failed:', emailErr.message); }
       }
-      if (resource === 'messages' && body.body) {
-        try {
-          const { sendMessageNotification } = require('../lib/reminders');
-          const senderRole = body.senderRole;
-          const studentId = body.studentId;
-          // Find student email
-          const students = isValidId(studentId) ? await dbGet(`/students?id=eq.${studentId}&limit=1`) : [];
-          const studentEmail = students[0]?.parent_email;
-          const studentName = students[0]?.student_name || 'Student';
-          const portalUrl = body.portalUrl || null;
-
-          if (senderRole === 'student' || senderRole === 'parent') {
-            // Student messaged — notify the tutor
-            // Get tutor via bookings
-            const bk = await dbGet(`/bookings?student_id=eq.${studentId}&status=neq.cancelled&order=start_time.desc&limit=1`);
-            const tutorName = bk[0]?.tutor_name;
-            if (tutorName) {
-              const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
-              const tutorEmail = profiles[0]?.email;
-              if (tutorEmail) {
-                await sendMessageNotification({
-                  recipientEmail: tutorEmail, recipientName: tutorName,
-                  senderName: body.senderName || studentName, senderRole,
-                  preview: body.body, portalUrl,
-                });
-              }
-            }
-          } else {
-            // Tutor/admin messaged — notify the student
-            if (studentEmail) {
-              await sendMessageNotification({
-                recipientEmail: studentEmail, recipientName: studentName,
-                senderName: body.senderName || 'Your tutor', senderRole,
-                preview: body.body, portalUrl,
-              });
-            }
-          }
-        } catch(emailErr) { console.warn('Message notification failed:', emailErr.message); }
-      }
 
       return res.status(201).json({ success: true, record: created });
     }
@@ -682,8 +635,6 @@ module.exports = async (req, res) => {
           updates.completed = req.body.completed;
           updates.completed_at = req.body.completed ? new Date().toISOString() : null;
         }
-      } else if (resource === 'messages') {
-        if (typeof req.body.read === 'boolean') updates.read = req.body.read;
       }
       const r = await supabaseRequest(`/${table}?id=eq.${id}`, {
         method: 'PATCH', prefer: 'return=representation',
