@@ -35,6 +35,10 @@ module.exports = async (req, res) => {
       return res.status(200).json({ status: 'free', amount: 0 });
     }
 
+    // Deterministic per logical charge attempt, so a client retry (network
+    // blip, double-click) reuses the same PaymentIntent instead of charging twice.
+    const idempotencyKey = `charge:${customerId}:${paymentMethodId}:${tutorName}:${subject}:${lessonDate}:${lessonType}`;
+
     const paymentIntent = await payments.createPaymentIntent({
       amount: pricing.amount,
       currency: pricing.currency,
@@ -44,6 +48,7 @@ module.exports = async (req, res) => {
       offSession: true,
       description: `${pricing.label} — ${studentName} — ${tutorName}`,
       receiptEmail: parentEmail,
+      idempotencyKey,
       metadata: {
         lessonType, studentLevel: studentLevel || '',
         studentName: studentName || '', tutorName: tutorName || '',

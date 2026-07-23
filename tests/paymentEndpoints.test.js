@@ -13,6 +13,13 @@ function mockCors() {
   const p = require.resolve(path.join(backendRoot, 'lib/cors.js'));
   require.cache[p] = { id: p, filename: p, loaded: true, exports: { applyCors: () => false } };
 }
+function mockAdminAuth() {
+  const p = require.resolve(path.join(backendRoot, 'lib/auth.js'));
+  require.cache[p] = {
+    id: p, filename: p, loaded: true,
+    exports: { requireAdmin: async () => ({ id: 'admin-1', role: 'admin' }) },
+  };
+}
 function makeRes() {
   const res = {};
   res.status = (c) => { res.statusCode = c; return res; };
@@ -83,6 +90,7 @@ test('POST billing rejects an unknown resource', async () => {
 test('analytics refund-booking issues a refund for a paid booking', async () => {
   mockPaymentsModule({ createRefund: async (params) => ({ id: 're_1', amount: params.amount || 4000 }) });
   mockCors();
+  mockAdminAuth();
   const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
   require.cache[dbPath] = {
     id: dbPath, filename: dbPath, loaded: true,
@@ -98,6 +106,7 @@ test('analytics refund-booking issues a refund for a paid booking', async () => 
 test('analytics refund-booking rejects a booking with no payment', async () => {
   mockPaymentsModule({});
   mockCors();
+  mockAdminAuth();
   const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
   require.cache[dbPath] = {
     id: dbPath, filename: dbPath, loaded: true,

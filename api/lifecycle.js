@@ -3,6 +3,10 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
+const { requireCronSecret } = require('../lib/cronAuth');
+const { escapeHtml } = require('../lib/escapeHtml');
+const { isValidId } = require('../lib/validate');
+const { requireAdmin } = require('../lib/auth');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -15,6 +19,7 @@ module.exports = async (req, res) => {
 
   // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
   if (resource === 'auto-payout') {
+    if (!requireCronSecret(req, res)) return;
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
     try {
@@ -28,11 +33,12 @@ module.exports = async (req, res) => {
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
         if (amount < 5000) { results.push({ tutor: acct.tutor_name, status: 'below_minimum', amount }); continue; }
         try {
+          const payoutWeek = new Date().toISOString().slice(0,10);
           const transfer = await stripe.transfers.create({
             amount, currency: 'gbp',
             destination: acct.stripe_account_id,
-            description: `Seeds weekly payout — ${acct.tutor_name} — ${new Date().toISOString().slice(0,10)}`,
-          });
+            description: `Seeds weekly payout — ${acct.tutor_name} — ${payoutWeek}`,
+          }, { idempotencyKey: `auto-payout:${acct.tutor_name}:${payoutWeek}` });
           await supabaseRequest(
             `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`,
             { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
@@ -132,6 +138,7 @@ module.exports = async (req, res) => {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
     const { bookingId, studentEmail, lessonType, studentLevel, studentName, tutorName, subject, startTime } = req.body || {};
     if (!bookingId || !studentEmail) return res.status(400).json({ error: 'bookingId and studentEmail required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
 
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
@@ -165,7 +172,7 @@ module.exports = async (req, res) => {
           description: `${pricing.label} — ${studentName} — ${tutorName}`,
           receipt_email: studentEmail,
           metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
-        });
+        }, { idempotencyKey: `booking-charge:${bookingId}` });
         // Update booking with payment intent
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -198,7 +205,7 @@ module.exports = async (req, res) => {
           metadata: { bookingId, studentEmail },
           success_url: `${origin}?payment=success`,
           cancel_url: `${origin}?payment=cancelled`,
-        });
+        }, { idempotencyKey: `booking-payment-link:${bookingId}` });
         // Mark booking as payment_pending
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -255,6 +262,7 @@ module.exports = async (req, res) => {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
     const { bookingId } = req.query;
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
     try {
       const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
@@ -302,6 +310,7 @@ module.exports = async (req, res) => {
       sid = students[0]?.id;
     }
     if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
+    if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
     try {
       let path = `/progress_history?student_id=eq.${sid}&order=created_at.asc`;
       if (subject) path += `&subject=eq.${encodeURIComponent(subject)}`;
@@ -313,7 +322,9 @@ module.exports = async (req, res) => {
   if (resource === 'lead-notes') {
     const { leadId, adminNotes } = req.body || {};
     if (req.method === 'POST') {
+      if (!(await requireAdmin(req, res))) return;
       if (!leadId) return res.status(400).json({ error: 'leadId required' });
+      if (!isValidId(leadId)) return res.status(400).json({ error: 'Invalid leadId' });
       try {
         const r = await supabaseRequest(`/leads?id=eq.${leadId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -329,6 +340,7 @@ module.exports = async (req, res) => {
   if (resource === 'invoice') {
     const { bookingId } = req.query;
     if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
     try {
       const bookings = await dbGet(`/bookings?id=eq.${bookingId}&select=*,students(student_name,parent_name,parent_email)&limit=1`);
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
@@ -347,18 +359,18 @@ module.exports = async (req, res) => {
       .footer{margin-top:30px;font-size:12px;color:#A7A7A7;text-align:center}
       @media print{body{margin:0}}</style></head>
       <body>
-        <div class="header"><h1>Seeds Tuition</h1><p>Receipt #${bookingId.slice(0,8).toUpperCase()}</p></div>
+        <div class="header"><h1>Seeds Tuition</h1><p>Receipt #${escapeHtml(bookingId.slice(0,8).toUpperCase())}</p></div>
         <table>
-          <tr><td>Student</td><td>${b.students?.student_name||'—'}</td></tr>
-          <tr><td>Parent / billed to</td><td>${b.students?.parent_name||b.students?.student_name||'—'}</td></tr>
+          <tr><td>Student</td><td>${escapeHtml(b.students?.student_name)||'—'}</td></tr>
+          <tr><td>Parent / billed to</td><td>${escapeHtml(b.students?.parent_name||b.students?.student_name)||'—'}</td></tr>
           <tr><td>Date</td><td>${date}</td></tr>
-          <tr><td>Tutor</td><td>${b.tutor_name}</td></tr>
-          <tr><td>Subject</td><td>${b.subject||'—'}</td></tr>
-          <tr><td>Type</td><td>${typeLabel}</td></tr>
+          <tr><td>Tutor</td><td>${escapeHtml(b.tutor_name)}</td></tr>
+          <tr><td>Subject</td><td>${escapeHtml(b.subject)||'—'}</td></tr>
+          <tr><td>Type</td><td>${escapeHtml(typeLabel)}</td></tr>
           <tr><td>Duration</td><td>${b.duration_mins||55} minutes</td></tr>
           <tr class="total"><td>Amount paid</td><td>&pound;${((b.fee_pence||0)/100).toFixed(2)}</td></tr>
         </table>
-        ${b.stripe_payment_intent_id?`<p style="font-size:12px;color:#718096">Payment reference: ${b.stripe_payment_intent_id}</p>`:''}
+        ${b.stripe_payment_intent_id?`<p style="font-size:12px;color:#718096">Payment reference: ${escapeHtml(b.stripe_payment_intent_id)}</p>`:''}
         <div class="footer">Seeds Tuition &bull; seedstuition.co.uk &bull; Thank you for choosing Seeds</div>
         <script>window.print();</script>
       </body></html>`;
@@ -396,7 +408,7 @@ module.exports = async (req, res) => {
       @media print{body{margin:0}}</style></head>
       <body>
         <h1>Seeds Tuition — Earnings Statement</h1>
-        <p><strong>Tutor:</strong> ${tutorName}<br>
+        <p><strong>Tutor:</strong> ${escapeHtml(tutorName)}<br>
         <strong>Tax year:</strong> 6 April ${startY||new Date().getFullYear()-1} to 5 April ${startY?parseInt(startY)+1:new Date().getFullYear()}</p>
         <div class="summary">
           <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span>Total lessons delivered</span><strong>${bookings.length}</strong></div>
@@ -424,6 +436,7 @@ module.exports = async (req, res) => {
   // ── BULK CANCEL (admin cancels all lessons on a date/by tutor) ────────
   if (resource === 'bulk-cancel') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    if (!(await requireAdmin(req, res))) return;
     const { tutorName, date, reason } = req.body || {};
     if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
     try {
@@ -477,6 +490,7 @@ module.exports = async (req, res) => {
         sid = students[0].id;
       }
       if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
+      if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
 
       let order = 'created_at.desc';
       if (resource === 'progress') order = 'updated_at.desc';
@@ -618,7 +632,7 @@ module.exports = async (req, res) => {
           const senderRole = body.senderRole;
           const studentId = body.studentId;
           // Find student email
-          const students = await dbGet(`/students?id=eq.${studentId}&limit=1`);
+          const students = isValidId(studentId) ? await dbGet(`/students?id=eq.${studentId}&limit=1`) : [];
           const studentEmail = students[0]?.parent_email;
           const studentName = students[0]?.student_name || 'Student';
           const portalUrl = body.portalUrl || null;
@@ -659,6 +673,7 @@ module.exports = async (req, res) => {
     if (req.method === 'PATCH') {
       const { id } = req.body || {};
       if (!id) return res.status(400).json({ error: 'id required' });
+      if (!isValidId(id)) return res.status(400).json({ error: 'Invalid id' });
       const updates = {};
       if (resource === 'homework') {
         if (typeof req.body.completed === 'boolean') {

@@ -11,7 +11,7 @@ function mockModule(relPath, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing } = {}) {
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   mockModule('lib/db.js', {
@@ -31,6 +31,20 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing } = {}) {
   mockModule('lib/pricing.js', {
     resolvePrice: () => ({ duration: 55, amount: 4000 }),
     ...pricing,
+  });
+  // Default: caller is an authenticated admin, so tests exercise the
+  // handler's own logic rather than the auth gate. Pass auth:{requireAdmin:...}
+  // to test the unauthorized path specifically.
+  mockModule('lib/auth.js', {
+    requireAdmin: async () => ({ id: 'admin-1', role: 'admin' }),
+    getAuthedUser: async () => ({ id: 'admin-1', role: 'admin' }),
+    ...auth,
+  });
+  // Default: any id "looks valid" so tests can use readable fixture ids
+  // like 'lead1' instead of real UUIDs.
+  mockModule('lib/validate.js', {
+    isValidId: () => true,
+    ...validate,
   });
 
   return require(path.join(backendRoot, apiRelPath));
