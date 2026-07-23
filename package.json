@@ -7,7 +7,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "nodemailer": "^6.9.7",
+    "nodemailer": "^9.0.3",
     "raw-body": "^2.5.2",
     "stripe": "^14.0.0"
   }
