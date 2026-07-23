@@ -4,6 +4,7 @@ const { dbGet } = require('../lib/db');
 const { getPaymentService } = require('../lib/payments');
 const { isValidId } = require('../lib/validate');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 const TUTOR_CUT = 0.78;
 
@@ -12,8 +13,10 @@ module.exports = async (req, res) => {
 
   // ── POST: booking management (cancel / reschedule / refund) — admin only ───────
   if (req.method === 'POST') {
-    if (!(await requireAdmin(req, res))) return;
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
     const { action, bookingId, newStartTime } = req.body || {};
+    await logAdminAction({ actor: admin.email, action, targetType: 'booking', targetId: bookingId || null });
     if (action === 'cancel-booking') {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
       if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });

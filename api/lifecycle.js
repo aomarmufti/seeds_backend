@@ -7,6 +7,7 @@ const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
 const { isValidId } = require('../lib/validate');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -322,9 +323,11 @@ module.exports = async (req, res) => {
   if (resource === 'lead-notes') {
     const { leadId, adminNotes } = req.body || {};
     if (req.method === 'POST') {
-      if (!(await requireAdmin(req, res))) return;
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
       if (!leadId) return res.status(400).json({ error: 'leadId required' });
       if (!isValidId(leadId)) return res.status(400).json({ error: 'Invalid leadId' });
+      await logAdminAction({ actor: admin.email, action: 'lead-notes', targetType: 'lead', targetId: leadId });
       try {
         const r = await supabaseRequest(`/leads?id=eq.${leadId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -436,9 +439,11 @@ module.exports = async (req, res) => {
   // ── BULK CANCEL (admin cancels all lessons on a date/by tutor) ────────
   if (resource === 'bulk-cancel') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
-    if (!(await requireAdmin(req, res))) return;
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
     const { tutorName, date, reason } = req.body || {};
     if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    await logAdminAction({ actor: admin.email, action: 'bulk-cancel', targetType: 'tutor', targetId: tutorName || null, details: { date, reason } });
     try {
       // Find all confirmed bookings on that date
       const dayStart = new Date(date + 'T00:00:00Z').toISOString();

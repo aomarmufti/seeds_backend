@@ -2,6 +2,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -128,7 +129,13 @@ module.exports = async (req, res) => {
     if (action === 'approve-and-transfer' || body.markPaid) {
       // The only caller is the admin panel's "Approve & mark paid" — this
       // moves real money via Stripe transfer.
-      if (!(await requireAdmin(req, res))) return;
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      await logAdminAction({
+        actor: admin.email, action: 'approve-and-transfer',
+        targetType: 'tutor', targetId: tutorName,
+        details: { amountPence: body.amountPence },
+      });
       const stripe = getStripe();
       try {
         await supabaseRequest(

@@ -3,6 +3,7 @@
 const { applyCors } = require('../lib/cors');
 const { supabaseRequest } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -10,9 +11,15 @@ module.exports = async (req, res) => {
 
   // Every action here (creating/editing/deactivating accounts, bulk email)
   // is an admin-only operation.
-  if (!(await requireAdmin(req, res))) return;
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
 
   const { action } = req.body || {};
+  await logAdminAction({
+    actor: admin.email, action,
+    targetType: 'user', targetId: req.body?.userId || null,
+    details: { email: req.body?.email, to: req.body?.to },
+  });
 
   // ── CREATE STUDENT ────────────────────────
   if (action === 'create-student') {
