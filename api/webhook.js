@@ -15,6 +15,7 @@ const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { verifyWebhookSignature: verifyCalendlySignature, parseInviteeCreatedPayload } = require('../lib/calendly');
 const { getMeetingLink } = require('../lib/tutors');
+const { logError, alertCritical } = require('../lib/logger');
 
 module.exports.config = {
   api: { bodyParser: false },
@@ -50,7 +51,7 @@ async function handleStripeWebhook(req, res, rawBody) {
   try {
     event = payments.constructWebhookEvent(rawBody, req.headers['stripe-signature']);
   } catch (err) {
-    console.error('Stripe webhook signature failed:', err.message);
+    logError('webhook.stripe.signature', err);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
@@ -71,7 +72,7 @@ async function handleStripeWebhook(req, res, rawBody) {
       throw new Error(errBody.message || `Dedup insert failed with status ${dedupRes.status}`);
     }
   } catch (err) {
-    console.error('Stripe webhook dedup check failed:', err.message);
+    logError('webhook.stripe.dedup', err);
     return res.status(500).json({ error: 'Webhook dedup check failed' });
   }
 
@@ -147,7 +148,12 @@ async function handleStripeWebhook(req, res, rawBody) {
     }
     case 'payment_intent.payment_failed': {
       const pi = event.data.object;
-      console.error(`❌ Payment failed: ${pi.id} — ${pi.last_payment_error?.message}`);
+      const failureMessage = pi.last_payment_error?.message || 'Unknown error';
+      logError('webhook.stripe.payment_intent.payment_failed', new Error(`${pi.id}: ${failureMessage}`));
+      await alertCritical(
+        'Payment failed',
+        `PaymentIntent ${pi.id} failed for booking ${pi.metadata?.bookingId || '(none)'}: ${failureMessage}`
+      );
       if (pi.metadata && pi.metadata.bookingId) {
         await supabaseRequest(`/bookings?id=eq.${pi.metadata.bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -185,7 +191,7 @@ async function handleCalendlyWebhook(req, res, rawBody) {
   try {
     verifyCalendlySignature(rawBody.toString('utf8'), req.headers['calendly-webhook-signature'], process.env.CALENDLY_WEBHOOK_SIGNING_KEY);
   } catch (err) {
-    console.error('Calendly webhook signature failed:', err.message);
+    logError('webhook.calendly.signature', err);
     return res.status(400).json({ error: err.message });
   }
 
@@ -215,7 +221,7 @@ async function handleCalendlyWebhook(req, res, rawBody) {
       throw new Error(errBody.message || `Dedup insert failed with status ${dedupRes.status}`);
     }
   } catch (err) {
-    console.error('Calendly webhook dedup check failed:', err.message);
+    logError('webhook.calendly.dedup', err);
     return res.status(500).json({ error: 'Webhook dedup check failed' });
   }
 
@@ -227,7 +233,8 @@ async function handleCalendlyWebhook(req, res, rawBody) {
     }
     return res.status(200).json({ received: true });
   } catch (err) {
-    console.error('Calendly webhook handling failed:', err.message);
+    logError('webhook.calendly.handling', err);
+    await alertCritical('Calendly webhook processing failed', `event=${event} dedupKey=${dedupKey}: ${err.message}`);
     return res.status(500).json({ error: err.message });
   }
 }

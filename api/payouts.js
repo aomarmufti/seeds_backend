@@ -3,6 +3,7 @@ const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
+const { logError, alertCritical } = require('../lib/logger');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -173,7 +174,11 @@ module.exports = async (req, res) => {
             body: JSON.stringify({ status: 'paid', paid_at: new Date().toISOString(), stripe_transfer_id: transferId, transfer_status: transferStatus }) }
         );
         return res.status(200).json({ success: true, transferId, transferStatus });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
+      } catch(e) {
+        logError('payouts.approve-and-transfer', e);
+        await alertCritical('Tutor payout transfer failed', `tutor=${tutorName} amountPence=${body.amountPence}: ${e.message}`);
+        return res.status(500).json({ error: e.message });
+      }
     }
 
     if (!tutorName || !body.amountPence || body.amountPence < 5000) {
