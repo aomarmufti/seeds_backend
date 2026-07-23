@@ -95,14 +95,66 @@ test('confirm booking pre-check catches an existing conflicting booking before i
 
 // ── action=calendly-link ────────────────────────────────────────────────────
 test('calendly-link returns a fresh scheduling URL for a tutor with a configured event type', async () => {
+  let queriedPath;
   const handler = loadWithMocks('api/bookings.js', {
-    db: { dbGet: async () => [{ calendly_event_type_uri: 'https://api.calendly.com/event_types/abc' }] },
+    db: { dbGet: async (p) => { queriedPath = p; return [{ calendly_event_type_uri: 'https://api.calendly.com/event_types/abc' }]; } },
     calendly: { createSchedulingLink: async ({ eventTypeUri }) => `https://calendly.com/booked?src=${eventTypeUri}` },
   });
   const res = makeRes();
   await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Azeem Omar-Mufti' } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.url, 'https://calendly.com/booked?src=https://api.calendly.com/event_types/abc');
+  assert.match(queriedPath, /^\/tutors\?name=eq\./, 'should read from the canonical tutors table, not profiles');
+});
+
+test('calendly-link returns a plain public Calendly URL directly, without minting a single-use link', async () => {
+  let mintCalled = false;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [{ calendly_event_type_uri: 'https://calendly.com/roots-academy/30min' }] },
+    calendly: { createSchedulingLink: async () => { mintCalled = true; return 'should-not-be-used'; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.url, 'https://calendly.com/roots-academy/30min');
+  assert.equal(mintCalled, false);
+});
+
+test('calendly-link for "Best available match" uses any tutor with scheduling configured', async () => {
+  let queriedPath;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async (p) => { queriedPath = p; return [{ calendly_event_type_uri: 'https://calendly.com/roots-academy/30min' }]; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Best available match' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.url, 'https://calendly.com/roots-academy/30min');
+  assert.match(queriedPath, /calendly_event_type_uri=not\.is\.null/);
+});
+
+test('calendly-link uses the trial event type for a trial lessonType', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: {
+      dbGet: async () => [{
+        calendly_trial_event_type_uri: 'https://calendly.com/roots-academy/initial-consultation',
+        calendly_event_type_uri: 'https://calendly.com/roots-academy/30min',
+      }],
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.url, 'https://calendly.com/roots-academy/initial-consultation');
+});
+
+test('calendly-link falls back to the lesson event type when no trial-specific one is configured', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [{ calendly_trial_event_type_uri: null, calendly_event_type_uri: 'https://calendly.com/roots-academy/30min' }] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.url, 'https://calendly.com/roots-academy/30min');
 });
 
 test('calendly-link 404s for a tutor with no Calendly event type configured', async () => {
