@@ -10,9 +10,26 @@
 
 const { applyCors } = require('../lib/cors');
 const { getPaymentService } = require('../lib/payments');
+const { requireAuth } = require('../lib/auth');
+const { dbGet } = require('../lib/db');
+
+// Confirms the authenticated caller owns this Stripe customer id (their own
+// students.stripe_customer_id), unless they're an admin. Returns true/false;
+// callers are responsible for responding with 403 on false.
+async function callerOwnsCustomer(caller, customerId) {
+  if (caller.role === 'admin') return true;
+  if (!customerId) return false;
+  const students = await dbGet(
+    `/students?parent_email=eq.${encodeURIComponent(caller.email)}&stripe_customer_id=eq.${encodeURIComponent(customerId)}&limit=1`
+  );
+  return students.length > 0;
+}
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
+
+  const caller = await requireAuth(req, res);
+  if (!caller) return;
 
   let payments;
   try {
@@ -24,6 +41,9 @@ module.exports = async (req, res) => {
   if (req.method === 'GET' && req.query.resource === 'payment-methods') {
     const { customerId } = req.query;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await callerOwnsCustomer(caller, customerId))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     try {
       const methods = await payments.listPaymentMethods(customerId);
       return res.status(200).json(methods.map(m => ({
@@ -42,10 +62,19 @@ module.exports = async (req, res) => {
     const { resource } = req.body || {};
 
     if (resource === 'payment-methods') {
-      const { action, paymentMethodId } = req.body;
+      const { action, paymentMethodId, customerId } = req.body;
       if (action !== 'detach') return res.status(400).json({ error: 'Unknown action' });
-      if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+      if (!paymentMethodId || !customerId) return res.status(400).json({ error: 'paymentMethodId and customerId required' });
+      if (!(await callerOwnsCustomer(caller, customerId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       try {
+        // Confirm the payment method actually belongs to the customer the
+        // caller was verified to own, not just any paymentMethodId they pass.
+        const methods = await payments.listPaymentMethods(customerId);
+        if (!methods.some(m => m.id === paymentMethodId)) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
         await payments.detachPaymentMethod(paymentMethodId);
         return res.status(200).json({ success: true });
       } catch (err) {
@@ -61,6 +90,9 @@ module.exports = async (req, res) => {
       // endpoint can do.
       const { customerId, returnUrl } = req.body;
       if (!customerId) return res.status(400).json({ error: 'customerId required' });
+      if (!(await callerOwnsCustomer(caller, customerId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       try {
         const session = await payments.createCustomerPortalSession({
           customerId,
