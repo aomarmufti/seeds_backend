@@ -4,7 +4,7 @@ const path = require('path');
 
 const backendRoot = path.join(__dirname, '..');
 
-function loadWebhookHandler({ dbMock, dbGetMock, sendBookingConfirmationMock, event } = {}) {
+function loadWebhookHandler({ dbMock, dbGetMock, sendBookingConfirmationMock, event, loggerMock } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   const rawBodyPath = require.resolve('raw-body');
@@ -27,6 +27,11 @@ function loadWebhookHandler({ dbMock, dbGetMock, sendBookingConfirmationMock, ev
     id: remindersPath, filename: remindersPath, loaded: true,
     exports: { sendBookingConfirmation: sendBookingConfirmationMock || (async () => {}) },
   };
+
+  if (loggerMock) {
+    const loggerPath = require.resolve(path.join(backendRoot, 'lib/logger.js'));
+    require.cache[loggerPath] = { id: loggerPath, filename: loggerPath, loaded: true, exports: loggerMock };
+  }
 
   process.env.STRIPE_SECRET_KEY = 'sk_test_x';
   process.env.STRIPE_WEBHOOK_SECRET = 'whsec_x';
@@ -174,6 +179,28 @@ test('payment_intent.payment_failed marks the linked booking as payment_failed',
   assert.equal(res.statusCode, 200);
   assert.equal(patches[0].path, '/bookings?id=eq.b4');
   assert.equal(patches[0].body.status, 'payment_failed');
+});
+
+test('payment_intent.payment_failed alerts the admin, not just logs a line', async () => {
+  const alerts = [];
+  const handler = loadWebhookHandler({
+    event: {
+      id: 'evt_failed_2', type: 'payment_intent.payment_failed',
+      data: { object: { id: 'pi_5', metadata: { bookingId: 'b9' }, last_payment_error: { message: 'insufficient funds' } } },
+    },
+    dbMock: async () => ({ ok: true, json: async () => ({}) }),
+    loggerMock: {
+      logError: () => {},
+      alertCritical: async (subject, details) => { alerts.push({ subject, details }); },
+    },
+  });
+  const res = makeRes();
+  await handler(makeReq(), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].subject, /Payment failed/i);
+  assert.match(alerts[0].details, /pi_5/);
+  assert.match(alerts[0].details, /insufficient funds/);
 });
 
 test('rejects non-POST requests', async () => {
