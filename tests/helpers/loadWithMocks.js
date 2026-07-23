@@ -11,7 +11,7 @@ function mockModule(relPath, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate } = {}) {
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   mockModule('lib/db.js', {
@@ -19,6 +19,7 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     dbPost: async () => ({}),
     dbPatch: async () => ({}),
     supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
+    supabaseAdminRequest: async () => ({ ok: true, json: async () => ({ id: 'user-1' }) }),
     ...db,
   });
   mockModule('lib/reminders.js', {
@@ -46,6 +47,11 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
   mockModule('lib/validate.js', {
     isValidId: () => true,
     ...validate,
+  });
+  mockModule('lib/tutors.js', {
+    getMeetingLink: async () => 'https://meet.google.com/seeds-tuition',
+    registerTutor: async () => {},
+    ...tutors,
   });
 
   return require(path.join(backendRoot, apiRelPath));
