@@ -176,12 +176,16 @@ module.exports = async (req, res) => {
           // link straight away instead of waiting for the tutor to
           // manually propose slots. Tutors without Calendly set up yet
           // keep using the manual propose-slots flow below unaffected.
-          if (tutorProfile?.calendly_event_type_uri) {
+          // A new lead being assigned a tutor is precisely the "initial
+          // consultation" case, so prefer that event type over the regular
+          // paid-lesson one if both are configured.
+          const leadEventTypeUri = tutorProfile?.calendly_trial_event_type_uri || tutorProfile?.calendly_event_type_uri;
+          if (leadEventTypeUri) {
             try {
               const { createSchedulingLink } = require('../lib/calendly');
               const { sendCalendlyBookingLink } = require('../lib/reminders');
               const url = await createSchedulingLink({
-                eventTypeUri: tutorProfile.calendly_event_type_uri,
+                eventTypeUri: leadEventTypeUri,
                 trackingId: lead.id,
               });
               await sendCalendlyBookingLink({

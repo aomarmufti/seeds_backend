@@ -249,8 +249,15 @@ async function handleInviteeCreated(payload) {
     return;
   }
 
-  const profiles = await dbGet(`/profiles?calendly_event_type_uri=eq.${encodeURIComponent(parsed.eventTypeUri)}&limit=1`);
-  const tutorName = profiles[0]?.tutor_name || lead.assigned_tutor;
+  // A booked event type can be either the regular-lesson link or the
+  // initial-consultation link (SCRUM-55 follow-up) — check both columns
+  // rather than assuming it's always the same one.
+  const encodedEventTypeUri = encodeURIComponent(parsed.eventTypeUri);
+  const [byLessonUri, byTrialUri] = await Promise.all([
+    dbGet(`/profiles?calendly_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
+    dbGet(`/profiles?calendly_trial_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
+  ]);
+  const tutorName = byLessonUri[0]?.tutor_name || byTrialUri[0]?.tutor_name || lead.assigned_tutor;
   if (!tutorName) {
     console.warn(`Calendly invitee.created: no tutor resolved for event type ${parsed.eventTypeUri}`);
     return;

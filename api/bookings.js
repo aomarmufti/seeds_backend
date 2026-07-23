@@ -25,19 +25,30 @@ module.exports = async (req, res) => {
   // but `tutors` is keyed by name alone and always exists, so this works even
   // for tutors who don't have (or don't need) a portal account yet.
   if (action === 'calendly-link') {
-    const { tutorName } = req.query;
+    const { tutorName, lessonType } = req.query;
     if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+    // A trial/first-consultation booking and a regular paid lesson are
+    // typically different Calendly event types (e.g. a free 15-min intro
+    // call vs. a 30-min paid lesson) — pick the column that matches, falling
+    // back to the other one if only one has been configured so far.
+    const isTrial = lessonType === 'trial';
+    const primaryCol = isTrial ? 'calendly_trial_event_type_uri' : 'calendly_event_type_uri';
+    const fallbackCol = isTrial ? 'calendly_event_type_uri' : 'calendly_trial_event_type_uri';
     try {
       let eventTypeUri;
       if (tutorName === 'Best available match') {
         // No specific tutor chosen yet — any tutor with real-time scheduling
         // configured will do, matching how getMeetingLink/the conflict-check
         // already treat this value as "not a real tutor name".
-        const rows = await dbGet(`/tutors?calendly_event_type_uri=not.is.null&select=calendly_event_type_uri&limit=1`);
-        eventTypeUri = rows[0]?.calendly_event_type_uri;
+        const rows = await dbGet(`/tutors?${primaryCol}=not.is.null&select=${primaryCol}&limit=1`);
+        eventTypeUri = rows[0]?.[primaryCol];
+        if (!eventTypeUri) {
+          const fallbackRows = await dbGet(`/tutors?${fallbackCol}=not.is.null&select=${fallbackCol}&limit=1`);
+          eventTypeUri = fallbackRows[0]?.[fallbackCol];
+        }
       } else {
-        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=calendly_event_type_uri&limit=1`);
-        eventTypeUri = rows[0]?.calendly_event_type_uri;
+        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=${primaryCol},${fallbackCol}&limit=1`);
+        eventTypeUri = rows[0]?.[primaryCol] || rows[0]?.[fallbackCol];
       }
       if (!eventTypeUri) {
         return res.status(404).json({ error: 'This tutor doesn\'t have real-time scheduling set up yet.' });
