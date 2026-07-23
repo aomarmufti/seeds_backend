@@ -9,11 +9,53 @@ const { generateICS } = require('../lib/calendar');
 const { dbPost, dbGet } = require('../lib/db');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { getMeetingLink } = require('../lib/tutors');
+const { createSchedulingLink, getScheduledEvent } = require('../lib/calendly');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
 
   const action = req.query.action;
+
+  // ── CALENDLY: get a fresh single-use scheduling link for a tutor ──────────
+  // Used by the public booking wizard to embed real availability instead of
+  // a fake static calendar (SCRUM-52 follow-up).
+  if (action === 'calendly-link') {
+    const { tutorName } = req.query;
+    if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+    try {
+      const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&role=eq.tutor&select=calendly_event_type_uri&limit=1`);
+      const eventTypeUri = profiles[0]?.calendly_event_type_uri;
+      if (!eventTypeUri) {
+        return res.status(404).json({ error: 'This tutor doesn\'t have real-time scheduling set up yet.' });
+      }
+      const url = await createSchedulingLink({ eventTypeUri });
+      return res.status(200).json({ url });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // ── CALENDLY: resolve the real start/end time for a scheduled event ───────
+  // The embed's postMessage doesn't include the plain start time, only the
+  // event's API URI — this reads it back so the wizard can continue with a
+  // real, conflict-checked slot instead of the old fake day/time picker.
+  if (action === 'calendly-event') {
+    const { eventUri } = req.query;
+    if (!eventUri) return res.status(400).json({ error: 'eventUri required' });
+    // Only ever accept Calendly's own API host as a target — this value
+    // comes from a postMessage the embedded iframe sent us, and while
+    // Calendly controls that iframe's origin, we still shouldn't blindly
+    // forward an arbitrary caller-supplied URL to a server-side fetch.
+    if (!/^https:\/\/api\.calendly\.com\//.test(eventUri)) {
+      return res.status(400).json({ error: 'Invalid eventUri' });
+    }
+    try {
+      const event = await getScheduledEvent(eventUri);
+      return res.status(200).json(event);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
 
   // ── ICS download ─────────────────────────────────────────────────────────
   if (action === 'ics') {

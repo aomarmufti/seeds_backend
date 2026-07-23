@@ -11,7 +11,7 @@ function mockModule(relPath, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors } = {}) {
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   mockModule('lib/db.js', {
@@ -52,6 +52,13 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     getMeetingLink: async () => 'https://meet.google.com/seeds-tuition',
     registerTutor: async () => {},
     ...tutors,
+  });
+  mockModule('lib/calendly.js', {
+    createSchedulingLink: async () => 'https://calendly.com/seeds-tuition/lesson',
+    verifyWebhookSignature: () => {},
+    parseInviteeCreatedPayload: () => ({}),
+    getScheduledEvent: async () => ({ startTime: new Date().toISOString(), endTime: new Date().toISOString() }),
+    ...calendly,
   });
 
   return require(path.join(backendRoot, apiRelPath));
