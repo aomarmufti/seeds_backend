@@ -53,3 +53,47 @@ test('unknown analytics POST action returns 400', async () => {
   await handler({ method: 'POST', body: { action: 'not-a-real-action' } }, res);
   assert.equal(res.statusCode, 400);
 });
+
+test('resource=my-bookings returns only the caller\'s own bookings, scoped by their email', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: {
+      requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'parent@example.com' }),
+    },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/students')) return [{ id: 's1', stripe_customer_id: 'cus_1' }];
+        return [{
+          id: 'b1', subject: 'Maths', tutor_name: 'Azeem', lesson_type: 'gcse',
+          start_time: '2026-08-01T10:00:00Z', fee_pence: 4000, status: 'confirmed',
+          stripe_payment_intent_id: 'pi_1', payment_link: null,
+        }];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-bookings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.recentBookings.length, 1);
+  assert.equal(res.body.recentBookings[0].parentEmail, 'parent@example.com');
+  assert.equal(res.body.recentBookings[0].stripeCustomerId, 'cus_1');
+});
+
+test('resource=my-bookings requires an authenticated caller', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-bookings' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('resource=my-bookings returns an empty list for a caller with no student record', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-2', role: 'student', email: 'nobody@example.com' }) },
+    db: { dbGet: async () => [] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-bookings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.recentBookings, []);
+});

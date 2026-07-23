@@ -3,7 +3,7 @@ const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
 const { getPaymentService } = require('../lib/payments');
 const { isValidId } = require('../lib/validate');
-const { requireAdmin } = require('../lib/auth');
+const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 
 const TUTOR_CUT = 0.78;
@@ -117,6 +117,45 @@ module.exports = async (req, res) => {
         '/profiles?role=eq.pending&select=id,full_name,email,subject,level,created_at&order=created_at.desc'
       );
       return res.status(200).json(data);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // A parent's own bookings/payment history + Stripe customer id —
+  // self-service, scoped to the caller's own record rather than admin-only.
+  // Used by the student portal (previously it called the admin-only default
+  // resource below with no auth, which 401'd for every real student — this
+  // replaces that broken call). Shape matches `recentBookings` below so the
+  // existing frontend rendering code needs no changes beyond the URL/auth.
+  if (req.query.resource === 'my-bookings') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    try {
+      const students = await dbGet(
+        `/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id,stripe_customer_id`
+      );
+      if (!students.length) return res.status(200).json({ recentBookings: [] });
+      const studentIds = students.map(s => s.id);
+      const bookings = await dbGet(
+        `/bookings?student_id=in.(${studentIds.join(',')})` +
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,stripe_payment_intent_id,payment_link&order=start_time.desc`
+      );
+      return res.status(200).json({
+        recentBookings: bookings.map(b => ({
+          id: b.id,
+          tutorName: b.tutor_name,
+          subject: b.subject,
+          lessonType: b.lesson_type,
+          startTime: b.start_time,
+          feePence: b.fee_pence,
+          status: b.status,
+          paymentIntentId: b.stripe_payment_intent_id || null,
+          paymentLink: b.payment_link || null,
+          parentEmail: caller.email,
+          stripeCustomerId: students.find(s => s.stripe_customer_id)?.stripe_customer_id || null,
+        })),
+      });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }

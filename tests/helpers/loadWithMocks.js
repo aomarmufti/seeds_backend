@@ -37,7 +37,8 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
   // to test the unauthorized path specifically.
   mockModule('lib/auth.js', {
     requireAdmin: async () => ({ id: 'admin-1', role: 'admin' }),
-    getAuthedUser: async () => ({ id: 'admin-1', role: 'admin' }),
+    requireAuth: async () => ({ id: 'admin-1', role: 'admin', email: 'admin@example.com' }),
+    getAuthedUser: async () => ({ id: 'admin-1', role: 'admin', email: 'admin@example.com' }),
     ...auth,
   });
   // Default: any id "looks valid" so tests can use readable fixture ids
