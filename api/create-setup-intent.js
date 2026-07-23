@@ -5,6 +5,7 @@
 
 const { applyCors } = require('../lib/cors');
 const { getPaymentService } = require('../lib/payments');
+const { rateLimitOrReject } = require('../lib/rateLimit');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -12,6 +13,9 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
+
+  // Unauthenticated, creates a real Stripe customer — throttle abuse (SCRUM-20).
+  if (!(await rateLimitOrReject(req, res, 'create-setup-intent', { max: 10, windowSeconds: 900 }))) return;
 
   let payments;
   try {

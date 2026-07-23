@@ -5,6 +5,7 @@ const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { isValidId } = require('../lib/validate');
 const { getMeetingLink } = require('../lib/tutors');
+const { rateLimitOrReject, checkRateLimit } = require('../lib/rateLimit');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -113,6 +114,14 @@ module.exports = async (req, res) => {
     const { name, email, subject, level, goal, availability } = req.body;
     if (!name || !email || !subject || !level) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+    // Unauthenticated and fires 2 outbound emails per call — throttle by IP
+    // (catches a flood from one source) and separately by email (catches
+    // the same family's inbox being spammed even from rotating IPs).
+    if (!(await rateLimitOrReject(req, res, 'leads-create', { max: 5, windowSeconds: 900 }))) return;
+    const emailAllowed = await checkRateLimit(`leads-create:email:${email.toLowerCase()}`, 3, 3600);
+    if (!emailAllowed) {
+      return res.status(429).json({ error: 'Too many requests — please try again shortly.' });
     }
     try {
       const lead = await dbPost('/leads', {

@@ -10,6 +10,7 @@ const { dbPost, dbGet } = require('../lib/db');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { getMeetingLink } = require('../lib/tutors');
 const { createSchedulingLink, getScheduledEvent } = require('../lib/calendly');
+const { rateLimitOrReject } = require('../lib/rateLimit');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -182,6 +183,9 @@ module.exports = async (req, res) => {
 
   // ── Confirm booking ───────────────────────────────────────────────────────
   if (action === 'confirm' || (!action && req.method === 'POST')) {
+    // Unauthenticated, creates a real booking (and, for paid lessons, an
+    // associated charge) — throttle abuse (SCRUM-20).
+    if (!(await rateLimitOrReject(req, res, 'bookings-confirm', { max: 5, windowSeconds: 900 }))) return;
     try {
       const {
         studentName, parentName, parentEmail, parentPhone,

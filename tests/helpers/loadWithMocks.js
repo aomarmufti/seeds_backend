@@ -18,6 +18,7 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     dbGet: async () => [],
     dbPost: async () => ({}),
     dbPatch: async () => ({}),
+    dbRpc: async () => true,
     supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
     supabaseAdminRequest: async () => ({ ok: true, json: async () => ({ id: 'user-1' }) }),
     ...db,
