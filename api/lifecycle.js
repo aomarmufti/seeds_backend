@@ -6,7 +6,7 @@ const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
 const { isValidId } = require('../lib/validate');
-const { requireAdmin } = require('../lib/auth');
+const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { getMeetingLink } = require('../lib/tutors');
 
@@ -18,6 +18,64 @@ function getStripe() {
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   const resource = req.query.resource;
+
+  // ── CONTACT INFO (SCRUM-55: email + opt-in WhatsApp, no message storage) ──
+  // A parent/tutor can look up the OTHER party's contact card, but only for
+  // a relationship that actually exists (a real booking between them) —
+  // this is the ownership check SCRUM-13 flagged as missing elsewhere, done
+  // properly from the start here rather than trusting a client-supplied id.
+  if (resource === 'contact-info') {
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { for: forParty, tutorName, studentId } = req.query;
+    try {
+      if (forParty === 'tutor') {
+        if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+        // Caller must be the parent on at least one real booking with this tutor.
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id`);
+        const studentIds = students.map(s => s.id);
+        if (!studentIds.length) return res.status(403).json({ error: 'Forbidden' });
+        const bookings = await dbGet(
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&student_id=in.(${studentIds.join(',')})&limit=1`
+        );
+        if (!bookings.length) return res.status(403).json({ error: 'Forbidden' });
+        const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&role=eq.tutor&select=email,whatsapp_number,whatsapp_opted_in&limit=1`);
+        const tutor = profiles[0];
+        if (!tutor) return res.status(404).json({ error: 'Tutor contact info not available' });
+        return res.status(200).json({
+          email: tutor.email || null,
+          whatsappNumber: tutor.whatsapp_opted_in ? tutor.whatsapp_number : null,
+        });
+      }
+      if (forParty === 'parent') {
+        if (!studentId) return res.status(400).json({ error: 'studentId required' });
+        if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+        // Caller must be the tutor on at least one real booking with this
+        // student. getAuthedUser doesn't resolve tutor_name, so look it up
+        // from the caller's own profile rather than trusting a client value.
+        const callerProfile = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+        const myTutorName = callerProfile[0]?.tutor_name;
+        if (!myTutorName) return res.status(403).json({ error: 'Forbidden' });
+        const ownBookings = await dbGet(
+          `/bookings?student_id=eq.${studentId}&tutor_name=eq.${encodeURIComponent(myTutorName)}&limit=1`
+        );
+        if (!ownBookings.length) return res.status(403).json({ error: 'Forbidden' });
+        const students = await dbGet(`/students?id=eq.${studentId}&select=parent_email&limit=1`);
+        const parentEmail = students[0]?.parent_email;
+        if (!parentEmail) return res.status(404).json({ error: 'Parent contact info not available' });
+        const profiles = await dbGet(`/profiles?email=eq.${encodeURIComponent(parentEmail)}&select=whatsapp_number,whatsapp_opted_in&limit=1`);
+        const parent = profiles[0];
+        return res.status(200).json({
+          email: parentEmail,
+          whatsappNumber: parent?.whatsapp_opted_in ? parent.whatsapp_number : null,
+        });
+      }
+      return res.status(400).json({ error: 'for must be "tutor" or "parent"' });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
 
   // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
   if (resource === 'auto-payout') {
