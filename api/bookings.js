@@ -19,16 +19,38 @@ module.exports = async (req, res) => {
   // ── CALENDLY: get a fresh single-use scheduling link for a tutor ──────────
   // Used by the public booking wizard to embed real availability instead of
   // a fake static calendar (SCRUM-52 follow-up).
+  //
+  // Reads from the canonical `tutors` table (SCRUM-28) rather than `profiles`
+  // — a tutor only gets a `profiles` row once they've signed up for a login,
+  // but `tutors` is keyed by name alone and always exists, so this works even
+  // for tutors who don't have (or don't need) a portal account yet.
   if (action === 'calendly-link') {
     const { tutorName } = req.query;
     if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
     try {
-      const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&role=eq.tutor&select=calendly_event_type_uri&limit=1`);
-      const eventTypeUri = profiles[0]?.calendly_event_type_uri;
+      let eventTypeUri;
+      if (tutorName === 'Best available match') {
+        // No specific tutor chosen yet — any tutor with real-time scheduling
+        // configured will do, matching how getMeetingLink/the conflict-check
+        // already treat this value as "not a real tutor name".
+        const rows = await dbGet(`/tutors?calendly_event_type_uri=not.is.null&select=calendly_event_type_uri&limit=1`);
+        eventTypeUri = rows[0]?.calendly_event_type_uri;
+      } else {
+        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=calendly_event_type_uri&limit=1`);
+        eventTypeUri = rows[0]?.calendly_event_type_uri;
+      }
       if (!eventTypeUri) {
         return res.status(404).json({ error: 'This tutor doesn\'t have real-time scheduling set up yet.' });
       }
-      const url = await createSchedulingLink({ eventTypeUri });
+      // `eventTypeUri` is normally Calendly's internal API URI for an Event
+      // Type (https://api.calendly.com/event_types/...), which we can mint a
+      // fresh single-use link from. If instead it's just the tutor's plain
+      // public Calendly page (https://calendly.com/...) — simpler to obtain
+      // for a non-technical tutor, and all a widget embed actually needs —
+      // use it directly rather than requiring the API-only form.
+      const url = /^https:\/\/api\.calendly\.com\//.test(eventTypeUri)
+        ? await createSchedulingLink({ eventTypeUri })
+        : eventTypeUri;
       return res.status(200).json({ url });
     } catch (e) {
       return res.status(500).json({ error: e.message });
