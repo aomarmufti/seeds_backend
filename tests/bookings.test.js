@@ -92,3 +92,56 @@ test('confirm booking pre-check catches an existing conflicting booking before i
   assert.equal(res.statusCode, 409);
   assert.equal(res.body.conflict, true);
 });
+
+// ── action=calendly-link ────────────────────────────────────────────────────
+test('calendly-link returns a fresh scheduling URL for a tutor with a configured event type', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [{ calendly_event_type_uri: 'https://api.calendly.com/event_types/abc' }] },
+    calendly: { createSchedulingLink: async ({ eventTypeUri }) => `https://calendly.com/booked?src=${eventTypeUri}` },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Azeem Omar-Mufti' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.url, 'https://calendly.com/booked?src=https://api.calendly.com/event_types/abc');
+});
+
+test('calendly-link 404s for a tutor with no Calendly event type configured', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman' } }, res);
+  assert.equal(res.statusCode, 404);
+});
+
+test('calendly-link requires tutorName', async () => {
+  const handler = loadWithMocks('api/bookings.js');
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+// ── action=calendly-event ───────────────────────────────────────────────────
+test('calendly-event returns the real start/end time for a valid Calendly event URI', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    calendly: { getScheduledEvent: async () => ({ startTime: '2026-08-01T10:00:00Z', endTime: '2026-08-01T10:55:00Z' }) },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-event', eventUri: 'https://api.calendly.com/scheduled_events/xyz' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { startTime: '2026-08-01T10:00:00Z', endTime: '2026-08-01T10:55:00Z' });
+});
+
+test('calendly-event rejects a non-Calendly eventUri (SSRF guard)', async () => {
+  const handler = loadWithMocks('api/bookings.js');
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-event', eventUri: 'https://evil.example.com/steal-token' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('calendly-event requires eventUri', async () => {
+  const handler = loadWithMocks('api/bookings.js');
+  const res = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-event' } }, res);
+  assert.equal(res.statusCode, 400);
+});
