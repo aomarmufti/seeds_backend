@@ -178,6 +178,21 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, meetingLink });
     } catch(e) {
       console.error('confirm error:', e.message);
+      // DB-level guards (exclusion/unique constraints) are the backstop for the
+      // race this handler's own pre-check can't fully close; translate their
+      // violations into the same friendly response as the pre-check above.
+      if (e.message.includes('bookings_no_tutor_overlap')) {
+        return res.status(409).json({
+          error: `${req.body?.tutorName || 'This tutor'} is already booked at that time. Please choose a different slot.`,
+          conflict: true,
+        });
+      }
+      if (e.message.includes('bookings_one_trial_per_student')) {
+        return res.status(409).json({
+          error: 'This student has already used their free trial lesson.',
+          conflict: true,
+        });
+      }
       return res.status(500).json({ error: e.message });
     }
   }

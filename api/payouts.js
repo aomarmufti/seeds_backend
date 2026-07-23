@@ -2,6 +2,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -26,8 +27,13 @@ module.exports = async (req, res) => {
 
     if (resource === 'verify' && tutor) {
       try {
+        // Includes scheduled/payment_failed alongside confirmed/completed so
+        // a tutor can see a lesson's payment status read-only even before
+        // the student has paid — payout eligibility itself is still
+        // computed elsewhere (api/analytics.js) from confirmed/completed
+        // only, this is just visibility.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,students(student_name)&order=start_time.desc`
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(scheduled,payment_failed,confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,students(student_name)&order=start_time.desc`
         );
         return res.status(200).json(bookings);
       } catch(e) { return res.status(500).json({ error: e.message }); }
@@ -123,7 +129,13 @@ module.exports = async (req, res) => {
     if (action === 'approve-and-transfer' || body.markPaid) {
       // The only caller is the admin panel's "Approve & mark paid" — this
       // moves real money via Stripe transfer.
-      if (!(await requireAdmin(req, res))) return;
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      await logAdminAction({
+        actor: admin.email, action: 'approve-and-transfer',
+        targetType: 'tutor', targetId: tutorName,
+        details: { amountPence: body.amountPence },
+      });
       const stripe = getStripe();
       try {
         await supabaseRequest(

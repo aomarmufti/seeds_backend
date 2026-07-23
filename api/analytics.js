@@ -1,18 +1,22 @@
 // api/analytics.js — GET /api/analytics
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
+const { getPaymentService } = require('../lib/payments');
 const { isValidId } = require('../lib/validate');
 const { requireAdmin } = require('../lib/auth');
+const { logAdminAction } = require('../lib/auditLog');
 
 const TUTOR_CUT = 0.78;
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
 
-  // ── POST: booking management (cancel / reschedule) — admin only ───────
+  // ── POST: booking management (cancel / reschedule / refund) — admin only ───────
   if (req.method === 'POST') {
-    if (!(await requireAdmin(req, res))) return;
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
     const { action, bookingId, newStartTime } = req.body || {};
+    await logAdminAction({ actor: admin.email, action, targetType: 'booking', targetId: bookingId || null });
     if (action === 'cancel-booking') {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
       if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
@@ -24,18 +28,18 @@ module.exports = async (req, res) => {
         const booking = bookings[0];
         let refundId = null;
 
-        // Issue Stripe refund if there was a payment
-        if (booking?.stripe_payment_intent_id && process.env.STRIPE_SECRET_KEY) {
+        // Issue a refund if there was a payment
+        if (booking?.stripe_payment_intent_id) {
           try {
-            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-            const refund = await stripe.refunds.create({
-              payment_intent: booking.stripe_payment_intent_id,
+            const payments = getPaymentService();
+            const refund = await payments.createRefund({
+              paymentIntentId: booking.stripe_payment_intent_id,
               reason: 'requested_by_customer',
             });
             refundId = refund.id;
-          } catch(stripeErr) {
+          } catch(refundErr) {
             // Log but don't block the cancellation
-            console.warn('Stripe refund failed:', stripeErr.message);
+            console.warn('Refund failed:', refundErr.message);
           }
         }
 
@@ -45,6 +49,26 @@ module.exports = async (req, res) => {
         });
         if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
         return res.status(200).json({ success: true, refundId, refunded: !!refundId });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+    if (action === 'refund-booking') {
+      // Standalone refund not tied to cancellation — e.g. a partial
+      // refund for a shortened lesson, issued by an admin from the
+      // revenue dashboard's "Refund management" panel.
+      if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+      try {
+        const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+        const booking = bookings[0];
+        if (!booking) return res.status(404).json({ error: 'Booking not found' });
+        if (!booking.stripe_payment_intent_id) return res.status(400).json({ error: 'This booking has no associated payment to refund' });
+
+        const payments = getPaymentService();
+        const refund = await payments.createRefund({
+          paymentIntentId: booking.stripe_payment_intent_id,
+          amount: req.body.amountPence || undefined, // full refund if omitted
+          reason: req.body.reason || 'requested_by_customer',
+        });
+        return res.status(200).json({ success: true, refundId: refund.id, amount: refund.amount });
       } catch(e) { return res.status(500).json({ error: e.message }); }
     }
     if (action === 'reschedule-booking') {
@@ -58,7 +82,12 @@ module.exports = async (req, res) => {
         });
         if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
         return res.status(200).json({ success: true });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
+      } catch(e) {
+        if (e.message.includes('bookings_no_tutor_overlap')) {
+          return res.status(409).json({ error: 'That tutor is already booked at the new time. Please choose a different slot.', conflict: true });
+        }
+        return res.status(500).json({ error: e.message });
+      }
     }
     return res.status(400).json({ error: 'Unknown action' });
   }
@@ -98,7 +127,7 @@ module.exports = async (req, res) => {
 
   try {
     const [bookings, students, payouts] = await Promise.all([
-      dbGet('/bookings?select=*,students(student_name,parent_email)&order=start_time.desc'),
+      dbGet('/bookings?select=*,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc'),
       dbGet('/students?select=id,student_name,parent_email,created_at'),
       dbGet('/payouts?select=*&order=requested_at.desc'),
     ]);
@@ -173,10 +202,32 @@ module.exports = async (req, res) => {
         status: b.status,
         meetLink: b.meet_link || null,
         paymentIntentId: b.stripe_payment_intent_id || null,
+        paymentLink: b.payment_link || null,
         parentEmail: b.students?.parent_email || null,
+        stripeCustomerId: b.students?.stripe_customer_id || null,
         studentId: b.student_id || null,
       })),
       payouts: payouts.slice(0, 10),
+      failedPayments: bookings
+        .filter(b => b.status === 'payment_failed')
+        .map(b => ({
+          id: b.id,
+          studentName: b.students?.student_name || '—',
+          parentEmail: b.students?.parent_email || null,
+          tutorName: b.tutor_name,
+          subject: b.subject,
+          startTime: b.start_time,
+          feePence: b.fee_pence,
+        })),
+      reconciliation: {
+        confirmed: bookings.filter(b => b.status === 'confirmed').length,
+        scheduled: bookings.filter(b => b.status === 'scheduled').length,
+        paymentFailed: bookings.filter(b => b.status === 'payment_failed').length,
+        cancelled: bookings.filter(b => b.status === 'cancelled').length,
+        completed: bookings.filter(b => b.status === 'completed').length,
+        totalCollected: paid.filter(b => ['confirmed', 'completed'].includes(b.status)).reduce((s, b) => s + b.fee_pence, 0),
+        totalOutstanding: bookings.filter(b => b.status === 'scheduled').reduce((s, b) => s + b.fee_pence, 0),
+      },
     });
   } catch (err) {
     console.error('analytics error:', err.message);
