@@ -67,3 +67,46 @@ test('select-slot returns a friendly 409 when the overlap constraint fires', asy
   assert.equal(res.statusCode, 409);
   assert.match(res.body.error, /taken/);
 });
+
+function createLeadReq(overrides = {}) {
+  return {
+    method: 'POST',
+    body: { name: 'A Parent', email: 'parent@example.com', subject: 'Maths', level: 'gcse', ...overrides },
+  };
+}
+
+test('creates a new lead', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    db: baseDb({ dbPost: async () => ({ id: 'lead1' }) }),
+    reminders: { sendEnquiryConfirmation: async () => {}, sendAdminEnquiryAlert: async () => {} },
+  });
+  const res = makeRes();
+  await handler(createLeadReq(), res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.success, true);
+});
+
+test('lead creation rejects missing required fields', async () => {
+  const handler = loadWithMocks('api/leads.js', { db: baseDb() });
+  const res = makeRes();
+  await handler(createLeadReq({ email: undefined }), res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('lead creation is rate-limited by IP (SCRUM-20)', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    db: baseDb({ dbRpc: async (fn, args) => !args.p_key.startsWith('leads-create:ip:') }),
+  });
+  const res = makeRes();
+  await handler(createLeadReq(), res);
+  assert.equal(res.statusCode, 429);
+});
+
+test('lead creation is rate-limited by email even under the IP limit (SCRUM-20)', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    db: baseDb({ dbRpc: async (fn, args) => !args.p_key.startsWith('leads-create:email:') }),
+  });
+  const res = makeRes();
+  await handler(createLeadReq(), res);
+  assert.equal(res.statusCode, 429);
+});

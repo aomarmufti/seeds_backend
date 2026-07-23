@@ -24,6 +24,15 @@ test('confirm booking succeeds and creates a new student when none exists', asyn
   assert.equal(res.body.success, true);
 });
 
+test('confirm booking is rate-limited by IP (SCRUM-20)', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [], dbRpc: async () => false },
+  });
+  const res = makeRes();
+  await handler(confirmReq(), res);
+  assert.equal(res.statusCode, 429);
+});
+
 test('confirm booking reuses an existing student by parent email', async () => {
   let studentCreated = false;
   const handler = loadWithMocks('api/bookings.js', {
