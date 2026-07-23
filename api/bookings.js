@@ -8,17 +8,7 @@ const { sendBookingConfirmation, sendLessonReminder } = require('../lib/reminder
 const { generateICS } = require('../lib/calendar');
 const { dbPost, dbGet } = require('../lib/db');
 const { requireCronSecret } = require('../lib/cronAuth');
-
-const MEET_LINKS = {
-  'Azeem': process.env.MEET_LINK_AZEEM,
-  'Azeem Omar-Mufti': process.env.MEET_LINK_AZEEM,
-  'Suleiman': process.env.MEET_LINK_SULEIMAN,
-  'Abdul-Moez': process.env.MEET_LINK_ABDULMOEZ,
-};
-
-function getMeetingLink(tutorName) {
-  return MEET_LINKS[tutorName] || 'https://meet.google.com/seeds-tuition';
-}
+const { getMeetingLink } = require('../lib/tutors');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -31,7 +21,7 @@ module.exports = async (req, res) => {
       const { tutorName, subject, lessonType, studentLevel,
               startTime, studentName, studentEmail } = req.query;
       const pricing = resolvePrice(lessonType, studentLevel);
-      const meetingLink = getMeetingLink(tutorName);
+      const meetingLink = await getMeetingLink(tutorName);
       const icsContent = generateICS({
         studentName: studentName || 'Student',
         tutorName, subject, lessonType,
@@ -77,7 +67,7 @@ module.exports = async (req, res) => {
             parentEmail: email,
             tutorName:   b.tutor_name,
             subject:     b.subject,
-            meetingLink: b.meet_link || getMeetingLink(b.tutor_name),
+            meetingLink: b.meet_link || await getMeetingLink(b.tutor_name),
             startTime:   b.start_time,
           });
           sent++;
@@ -128,7 +118,7 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
 
       const pricing = resolvePrice(lessonType, studentLevel);
-      const meetingLink = getMeetingLink(tutorName);
+      const meetingLink = await getMeetingLink(tutorName);
 
       // Conflict check — prevent double-booking a tutor
       if (tutorName !== 'Best available match') {

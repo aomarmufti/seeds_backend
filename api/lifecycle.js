@@ -8,6 +8,7 @@ const { escapeHtml } = require('../lib/escapeHtml');
 const { isValidId } = require('../lib/validate');
 const { requireAdmin } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
+const { getMeetingLink } = require('../lib/tutors');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -76,11 +77,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'studentId, tutorName, startTime required' });
     }
     try {
-      const links = {
-        'Azeem Omar-Mufti': process.env.MEET_LINK_AZEEM,
-        'Suleiman': process.env.MEET_LINK_SULEIMAN,
-        'Abdul-Moez': process.env.MEET_LINK_ABDULMOEZ,
-      };
+      const meetingLink = await getMeetingLink(b.tutorName);
       const feeMap = { gcse: 4000, alevel: 4500, group: 2000, trial: 0 };
       const lessonType = b.lessonType || 'gcse';
       const created = [];
@@ -116,7 +113,7 @@ module.exports = async (req, res) => {
           duration_mins: b.durationMins || 55,
           fee_pence: feeMap[lessonType] ?? 4000,
           status: 'confirmed',
-          meet_link: links[b.tutorName] || 'https://meet.google.com/seeds-tuition',
+          meet_link: meetingLink,
         });
         created.push(booking);
       }

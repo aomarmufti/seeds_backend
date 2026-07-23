@@ -4,16 +4,7 @@ const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { isValidId } = require('../lib/validate');
-
-function getMeetingLink(tutorName) {
-  const links = {
-    'Azeem': process.env.MEET_LINK_AZEEM,
-    'Azeem Omar-Mufti': process.env.MEET_LINK_AZEEM,
-    'Suleiman': process.env.MEET_LINK_SULEIMAN,
-    'Abdul-Moez': process.env.MEET_LINK_ABDULMOEZ,
-  };
-  return links[tutorName] || 'https://meet.google.com/seeds-tuition';
-}
+const { getMeetingLink } = require('../lib/tutors');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -54,7 +45,7 @@ module.exports = async (req, res) => {
         } catch(e) {}
 
         const pricing = resolvePrice('trial', lead.level);
-        const meetingLink = getMeetingLink(tutorName);
+        const meetingLink = await getMeetingLink(tutorName);
 
         // Upsert student
         let student;

@@ -14,6 +14,7 @@ const { getPaymentService } = require('../lib/payments');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { verifyWebhookSignature: verifyCalendlySignature, parseInviteeCreatedPayload } = require('../lib/calendly');
+const { getMeetingLink } = require('../lib/tutors');
 
 module.exports.config = {
   api: { bodyParser: false },
@@ -231,16 +232,6 @@ async function handleCalendlyWebhook(req, res, rawBody) {
   }
 }
 
-function getMeetingLink(tutorName) {
-  const links = {
-    'Azeem': process.env.MEET_LINK_AZEEM,
-    'Azeem Omar-Mufti': process.env.MEET_LINK_AZEEM,
-    'Suleiman': process.env.MEET_LINK_SULEIMAN,
-    'Abdul-Moez': process.env.MEET_LINK_ABDULMOEZ,
-  };
-  return links[tutorName] || 'https://meet.google.com/seeds-tuition';
-}
-
 async function handleInviteeCreated(payload) {
   const parsed = parseInviteeCreatedPayload(payload);
   if (!parsed.trackingId) {
@@ -268,7 +259,7 @@ async function handleInviteeCreated(payload) {
   const durationMins = Math.round((new Date(parsed.endTime) - new Date(parsed.startTime)) / 60000) || 55;
   const lessonType = lead.notes && /trial/i.test(lead.notes) ? 'trial' : (lead.level === 'alevel' ? 'alevel' : 'gcse');
   const pricing = resolvePrice(lessonType, lead.level);
-  const meetingLink = getMeetingLink(tutorName);
+  const meetingLink = await getMeetingLink(tutorName);
 
   const existingStudents = await dbGet(`/students?parent_email=eq.${encodeURIComponent(lead.email)}&limit=1`);
   const student = existingStudents.length

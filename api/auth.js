@@ -1,9 +1,10 @@
 // api/auth.js — POST /api/auth
 // Routes by action: create-student | approve-student | invite-tutor | create-tutor
 const { applyCors } = require('../lib/cors');
-const { supabaseRequest } = require('../lib/db');
+const { supabaseRequest, supabaseAdminRequest, dbGet } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
+const { registerTutor } = require('../lib/tutors');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -26,18 +27,18 @@ module.exports = async (req, res) => {
     const { fullName, email, subject, level, assignedTutor } = req.body;
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
     try {
-      const adminRes = await supabaseRequest('/auth/v1/admin/users', {
+      const adminRes = await supabaseAdminRequest('/auth/v1/admin/users', {
         method: 'POST',
         body: JSON.stringify({ email, email_confirm: true, user_metadata: { full_name: fullName, role: 'student' } }),
       });
       const adminData = await adminRes.json();
       if (!adminRes.ok) throw new Error(adminData.message || JSON.stringify(adminData));
       const userId = adminData.id;
-      await supabaseRequest('/rest/v1/profiles', {
+      await supabaseRequest('/profiles', {
         method: 'POST', prefer: 'return=minimal',
         body: JSON.stringify({ id: userId, email, full_name: fullName, role: 'student', subject: subject||null, level: level||null, assigned_tutor: assignedTutor||null }),
       });
-      await supabaseRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
       return res.status(201).json({ success: true, userId });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
@@ -47,11 +48,11 @@ module.exports = async (req, res) => {
     const { userId, assignedTutor } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
     try {
-      const r = await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+      const r = await supabaseRequest('/profiles?id=eq.' + userId,
         { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'student', assigned_tutor: assignedTutor||null }) }
       );
       if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
-      await supabaseRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
       return res.status(200).json({ success: true });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
@@ -62,19 +63,20 @@ module.exports = async (req, res) => {
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
     try {
       // Create a pending_tutor account and send magic link
-      const adminRes = await supabaseRequest('/auth/v1/admin/users', {
+      const adminRes = await supabaseAdminRequest('/auth/v1/admin/users', {
         method: 'POST',
         body: JSON.stringify({ email, email_confirm: true, user_metadata: { full_name: fullName, role: 'pending_tutor', subjects } }),
       });
       const adminData = await adminRes.json();
       if (!adminRes.ok) throw new Error(adminData.message || JSON.stringify(adminData));
       const userId = adminData.id;
-      await supabaseRequest('/rest/v1/profiles', {
+      await supabaseRequest('/profiles', {
         method: 'POST', prefer: 'return=minimal',
         body: JSON.stringify({ id: userId, email, full_name: fullName, role: 'pending', tutor_name: fullName }),
       });
       // Send magic link invite
-      await supabaseRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await registerTutor({ name: fullName, email, subjects });
       return res.status(201).json({ success: true });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
@@ -84,18 +86,19 @@ module.exports = async (req, res) => {
     const { fullName, email, tutorName, subjects } = req.body;
     if (!fullName || !email) return res.status(400).json({ error: 'Name and email required' });
     try {
-      const adminRes = await supabaseRequest('/auth/v1/admin/users', {
+      const adminRes = await supabaseAdminRequest('/auth/v1/admin/users', {
         method: 'POST',
         body: JSON.stringify({ email, email_confirm: true, user_metadata: { full_name: fullName, role: 'tutor' } }),
       });
       const adminData = await adminRes.json();
       if (!adminRes.ok) throw new Error(adminData.message || JSON.stringify(adminData));
       const userId = adminData.id;
-      await supabaseRequest('/rest/v1/profiles', {
+      await supabaseRequest('/profiles', {
         method: 'POST', prefer: 'return=minimal',
         body: JSON.stringify({ id: userId, email, full_name: fullName, role: 'tutor', tutor_name: tutorName||fullName }),
       });
-      await supabaseRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      await registerTutor({ name: tutorName || fullName, email, subjects });
       return res.status(201).json({ success: true, userId });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
@@ -110,7 +113,7 @@ module.exports = async (req, res) => {
       if (subject !== undefined) updates.subject = subject;
       if (level !== undefined) updates.level = level;
       if (assignedTutor !== undefined) updates.assigned_tutor = assignedTutor;
-      const r = await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+      const r = await supabaseRequest('/profiles?id=eq.' + userId,
         { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(updates) }
       );
       if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
@@ -125,14 +128,33 @@ module.exports = async (req, res) => {
     try {
       const profileUpdates = {};
       if (fullName) profileUpdates.full_name = fullName;
-      if (tutorName) profileUpdates.tutor_name = tutorName;
       if (email) profileUpdates.email = email;
-      const r = await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
-        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(profileUpdates) }
-      );
-      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+
+      if (tutorName) {
+        const existing = await dbGet(`/profiles?id=eq.${userId}&select=tutor_name&limit=1`);
+        const oldTutorName = existing[0]?.tutor_name;
+        if (oldTutorName && oldTutorName !== tutorName) {
+          // Rename via the canonical tutors table (SCRUM-28) rather than
+          // patching profiles.tutor_name directly — a DB trigger cascades
+          // the new name into bookings/payouts/tutor_accounts/profiles
+          // automatically, so it can't silently desync between them.
+          await supabaseRequest(`/tutors?name=eq.${encodeURIComponent(oldTutorName)}`, {
+            method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ name: tutorName }),
+          });
+        } else if (!oldTutorName) {
+          profileUpdates.tutor_name = tutorName;
+        }
+      }
+
+      if (Object.keys(profileUpdates).length) {
+        const r = await supabaseRequest('/profiles?id=eq.' + userId,
+          { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(profileUpdates) }
+        );
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      }
       if (email) {
-        await supabaseRequest('/auth/v1/admin/users/' + userId,
+        await supabaseAdminRequest('/auth/v1/admin/users/' + userId,
           { method: 'PUT', body: JSON.stringify({ email }) }
         );
       }
@@ -146,11 +168,11 @@ module.exports = async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId required' });
     try {
       // Ban the user in Supabase auth
-      await supabaseRequest('/auth/v1/admin/users/' + userId,
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId,
         { method: 'PUT', body: JSON.stringify({ ban_duration: '876600h' }) } // ~100 years
       );
       // Mark profile as deactivated
-      await supabaseRequest('/rest/v1/profiles?id=eq.' + userId,
+      await supabaseRequest('/profiles?id=eq.' + userId,
         { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'deactivated' }) }
       );
       return res.status(200).json({ success: true });
@@ -163,7 +185,6 @@ module.exports = async (req, res) => {
     // to: 'all-students' | 'all-tutors' | 'all'
     if (!emailSubject || !emailBody) return res.status(400).json({ error: 'subject and body required' });
     try {
-      const { dbGet } = require('../lib/db');
       const nodemailer = require('nodemailer');
       const transporter = nodemailer.createTransport({
         host: 'smtp.resend.com', port: 465, secure: true,
