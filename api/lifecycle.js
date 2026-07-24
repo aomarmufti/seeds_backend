@@ -5,7 +5,7 @@ const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { getMeetingLink } = require('../lib/tutors');
@@ -49,11 +49,12 @@ async function verifyTutorIdentity(caller, tutorName) {
 // email rather than blocking booking with "contact your tutor", matching
 // what the public wizard already does for a brand-new family.
 async function findOrCreateOwnStudentRecord(caller, studentName) {
-  const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+  const email = normalizeEmail(caller.email);
+  const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&limit=1`);
   if (existing.length) return existing[0];
   return dbPost('/students', {
     parent_name: studentName || caller.email,
-    parent_email: caller.email,
+    parent_email: email,
     student_name: studentName || caller.email,
   });
 }
@@ -76,7 +77,7 @@ module.exports = async (req, res) => {
       if (forParty === 'tutor') {
         if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
         // Caller must be the parent on at least one real booking with this tutor.
-        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id`);
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id`);
         const studentIds = students.map(s => s.id);
         if (!studentIds.length) return res.status(403).json({ error: 'Forbidden' });
         const bookings = await dbGet(
@@ -298,7 +299,14 @@ module.exports = async (req, res) => {
           start_time: slotStart.toISOString(),
           duration_mins: b.durationMins || 55,
           fee_pence: feeMap[lessonType] ?? 4000,
-          status: 'confirmed',
+          // Trial lessons are free and confirmed immediately. Paid lessons
+          // start "scheduled" (awaiting payment) — the modal's own copy
+          // already promises this ("we'll charge your saved card / you'll
+          // get a payment link"), but the booking was previously created as
+          // confirmed unconditionally, before charge-student even ran, so a
+          // lesson was booked with zero payment enforcement regardless of
+          // whether the charge succeeded, failed, or was never attempted.
+          status: lessonType === 'trial' ? 'confirmed' : 'scheduled',
           meet_link: meetingLink,
         });
         created.push(booking);
@@ -375,17 +383,37 @@ module.exports = async (req, res) => {
 
       if (customer && savedPM) {
         // ── Charge saved card immediately ────────────────────────────────
-        const pi = await stripe.paymentIntents.create({
-          amount: pricing.amount,
-          currency: 'gbp',
-          customer: customer.id,
-          payment_method: savedPM.id,
-          confirm: true,
-          off_session: true,
-          description: `${pricing.label} — ${studentName} — ${tutorName}`,
-          receipt_email: studentEmail,
-          metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
-        }, { idempotencyKey: `booking-charge:${bookingId}` });
+        let pi;
+        try {
+          pi = await stripe.paymentIntents.create({
+            amount: pricing.amount,
+            currency: 'gbp',
+            customer: customer.id,
+            payment_method: savedPM.id,
+            confirm: true,
+            off_session: true,
+            description: `${pricing.label} — ${studentName} — ${tutorName}`,
+            receipt_email: studentEmail,
+            metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
+          }, { idempotencyKey: `booking-charge:${bookingId}` });
+        } catch (chargeErr) {
+          // A declined card (or any other Stripe charge failure) previously
+          // fell through to the generic 500 below and left the booking's
+          // status untouched — silently stuck as "scheduled" with no
+          // record of the failed attempt, and no clear signal to the
+          // caller beyond a raw Stripe error message.
+          await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+            method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ status: 'payment_failed' }),
+          });
+          if (chargeErr.type === 'StripeCardError') {
+            return res.status(402).json({
+              status: 'failed', error: 'card_declined',
+              message: chargeErr.message, code: chargeErr.code,
+            });
+          }
+          throw chargeErr;
+        }
         // Update booking with payment intent
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -532,7 +560,7 @@ module.exports = async (req, res) => {
       // Resolve from the caller's own email rather than trusting a
       // client-supplied studentEmail, which would let anyone look up
       // another parent's progress history just by knowing their email.
-      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&limit=1`);
       sid = students[0]?.id;
     }
     if (!sid) return res.status(400).json({ error: 'studentId required' });
@@ -726,7 +754,7 @@ module.exports = async (req, res) => {
         if (studentEmail.toLowerCase() !== caller.email.toLowerCase() && caller.role !== 'admin') {
           return res.status(403).json({ error: 'Forbidden' });
         }
-        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(studentEmail)}&limit=1`);
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(studentEmail))}&limit=1`);
         if (!students.length) return res.status(200).json([]);
         sid = students[0].id;
       }

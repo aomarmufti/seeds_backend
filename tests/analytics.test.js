@@ -168,3 +168,35 @@ test('resource=my-tutor-bookings returns an empty list for a caller with no tuto
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.recentBookings, []);
 });
+
+// Live bug: the admin dashboard's revenue/lesson figures counted any
+// fee-bearing booking regardless of whether it was actually paid, or even
+// cancelled — a scheduled-but-unpaid, payment_failed, or cancelled booking
+// inflated "Total Revenue", the monthly chart, and every per-tutor figure.
+test('default admin dashboard only counts actually-paid bookings as revenue', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/bookings')) {
+          const now = new Date().toISOString();
+          return [
+            { id: 'b1', tutor_name: 'Azeem', lesson_type: 'gcse', fee_pence: 4000, status: 'confirmed', start_time: now },
+            { id: 'b2', tutor_name: 'Azeem', lesson_type: 'gcse', fee_pence: 4000, status: 'scheduled', start_time: now },
+            { id: 'b3', tutor_name: 'Azeem', lesson_type: 'gcse', fee_pence: 4000, status: 'payment_failed', start_time: now },
+            { id: 'b4', tutor_name: 'Azeem', lesson_type: 'gcse', fee_pence: 4000, status: 'cancelled', start_time: now },
+          ];
+        }
+        if (path.startsWith('/students')) return [];
+        if (path.startsWith('/payouts')) return [];
+        return [];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.revenue.total, 4000, 'only the confirmed booking should count as revenue');
+  assert.equal(res.body.byType.gcse, 3, 'cancelled booking excluded from the lesson-type breakdown');
+  assert.equal(res.body.tutors.Azeem.lessons, 3, 'cancelled booking excluded from per-tutor lesson count');
+  assert.equal(res.body.tutors.Azeem.revenue, 4000, 'only the confirmed booking counts toward per-tutor revenue');
+});

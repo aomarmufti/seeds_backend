@@ -166,6 +166,52 @@ test('resource=lessons allows the named tutor even with no prior booking (first-
   assert.equal(res.statusCode, 201);
 });
 
+test('resource=lessons creates a trial booking as confirmed immediately (free, nothing to pay)', async () => {
+  let posted;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: {
+      ...dbForOwnership({ hasBooking: false }),
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
+        return [];
+      },
+      dbPost: async (path, body) => { if (path === '/bookings') posted = body; return { id: 'b1', ...body }; },
+    },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'trial', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(posted.status, 'confirmed');
+});
+
+test('resource=lessons creates a paid booking as scheduled (awaiting payment), not confirmed', async () => {
+  let posted;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: {
+      ...dbForOwnership({ hasBooking: false }),
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
+        return [];
+      },
+      dbPost: async (path, body) => { if (path === '/bookings') posted = body; return { id: 'b1', ...body }; },
+    },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'gcse', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(posted.status, 'scheduled');
+});
+
 test('resource=lessons self-heals a missing students row for a student/parent booking their own first lesson', async () => {
   let posted;
   const handler = loadWithMocks('api/lifecycle.js', {
@@ -336,6 +382,47 @@ test('resource=charge-student rejects a tutor who does not own the booking', asy
   const res = makeRes();
   await handler({ method: 'POST', query: { resource: 'charge-student' }, body: { bookingId: 'booking-1' } }, res);
   assert.equal(res.statusCode, 403);
+});
+
+test('resource=charge-student marks the booking payment_failed on a declined saved card', async () => {
+  let patched;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?id=eq.')) {
+          return [{
+            id: 'booking-1', tutor_name: 'Azeem Omar-Mufti', subject: 'Maths',
+            start_time: new Date().toISOString(), lesson_type: 'gcse',
+            students: { student_name: 'Real Student', parent_email: 'real-parent@example.com' },
+          }];
+        }
+        return [];
+      },
+      supabaseRequest: async (path, opts) => {
+        if (path.startsWith('/bookings?id=eq.')) patched = JSON.parse(opts.body);
+        return { ok: true, json: async () => ({}) };
+      },
+    },
+  });
+  const stripeModulePath = require.resolve('stripe');
+  const declinedError = Object.assign(new Error('Your card was declined.'), { type: 'StripeCardError', code: 'card_declined' });
+  require.cache[stripeModulePath] = {
+    id: stripeModulePath, filename: stripeModulePath, loaded: true,
+    exports: () => ({
+      customers: { list: async () => ({ data: [{ id: 'cus_1' }] }) },
+      paymentMethods: { list: async () => ({ data: [{ id: 'pm_1' }] }) },
+      paymentIntents: { create: async () => { throw declinedError; } },
+    }),
+  };
+  process.env.STRIPE_SECRET_KEY = 'sk_test_x';
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'charge-student' }, body: { bookingId: 'booking-1' } }, res);
+  assert.equal(res.statusCode, 402);
+  assert.equal(res.body.status, 'failed');
+  assert.equal(res.body.error, 'card_declined');
+  assert.equal(patched.status, 'payment_failed');
 });
 
 // ── progress-history ─────────────────────────────────────────────────────

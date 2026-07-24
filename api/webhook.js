@@ -16,6 +16,7 @@ const { resolvePrice } = require('../lib/pricing');
 const { verifyWebhookSignature: verifyCalendlySignature, parseInviteeCreatedPayload } = require('../lib/calendly');
 const { getMeetingLink } = require('../lib/tutors');
 const { logError, alertCritical } = require('../lib/logger');
+const { normalizeEmail } = require('../lib/validate');
 
 module.exports.config = {
   api: { bodyParser: false },
@@ -275,10 +276,11 @@ async function handleInviteeCreated(payload) {
   const pricing = resolvePrice(lessonType, lead.level);
   const meetingLink = await getMeetingLink(tutorName);
 
-  const existingStudents = await dbGet(`/students?parent_email=eq.${encodeURIComponent(lead.email)}&limit=1`);
+  const leadEmail = normalizeEmail(lead.email);
+  const existingStudents = await dbGet(`/students?parent_email=eq.${encodeURIComponent(leadEmail)}&limit=1`);
   const student = existingStudents.length
     ? existingStudents[0]
-    : await dbPost('/students', { parent_name: lead.name, parent_email: lead.email, student_name: lead.name });
+    : await dbPost('/students', { parent_name: lead.name, parent_email: leadEmail, student_name: lead.name });
 
   const isFree = pricing.amount === 0;
   const booking = await dbPost('/bookings', {

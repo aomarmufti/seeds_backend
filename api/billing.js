@@ -12,6 +12,7 @@ const { applyCors } = require('../lib/cors');
 const { getPaymentService } = require('../lib/payments');
 const { requireAuth } = require('../lib/auth');
 const { dbGet, dbPost, dbPatch } = require('../lib/db');
+const { normalizeEmail } = require('../lib/validate');
 
 // Confirms the authenticated caller owns this Stripe customer id (their own
 // students.stripe_customer_id), unless they're an admin. Returns true/false;
@@ -20,7 +21,7 @@ async function callerOwnsCustomer(caller, customerId) {
   if (caller.role === 'admin') return true;
   if (!customerId) return false;
   const students = await dbGet(
-    `/students?parent_email=eq.${encodeURIComponent(caller.email)}&stripe_customer_id=eq.${encodeURIComponent(customerId)}&limit=1`
+    `/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&stripe_customer_id=eq.${encodeURIComponent(customerId)}&limit=1`
   );
   return students.length > 0;
 }
@@ -91,11 +92,12 @@ module.exports = async (req, res) => {
     // already has one, rather than creating a duplicate on every click.
     if (resource === 'setup-intent') {
       try {
-        const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+        const email = normalizeEmail(caller.email);
+        const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&limit=1`);
         let student = existing[0];
         if (!student) {
           student = await dbPost('/students', {
-            parent_name: caller.email, parent_email: caller.email, student_name: caller.email,
+            parent_name: caller.email, parent_email: email, student_name: caller.email,
           });
         }
         let customerId = student.stripe_customer_id;

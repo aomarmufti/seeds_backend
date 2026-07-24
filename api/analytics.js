@@ -2,7 +2,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
 const { getPaymentService } = require('../lib/payments');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 
@@ -138,7 +138,7 @@ module.exports = async (req, res) => {
     if (!caller) return;
     try {
       const students = await dbGet(
-        `/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id,stripe_customer_id`
+        `/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id,stripe_customer_id`
       );
       if (!students.length) return res.status(200).json({ recentBookings: [] });
       const studentIds = students.map(s => s.id);
@@ -220,7 +220,11 @@ module.exports = async (req, res) => {
     const now = new Date();
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const paid = bookings.filter(b => b.fee_pence > 0);
+    // "Paid" must mean actually paid — status confirmed/completed — not
+    // just "has a fee". Previously this counted every fee-bearing booking
+    // regardless of status, so revenue figures included lessons that were
+    // scheduled-but-unpaid, had a declined card, or were even cancelled.
+    const paid = bookings.filter(b => b.fee_pence > 0 && (b.status === 'confirmed' || b.status === 'completed'));
 
     const totalRevenue = paid.reduce((s, b) => s + b.fee_pence, 0);
     const thisMonth    = paid.filter(b => new Date(b.start_time) >= thisMonthStart)
@@ -243,16 +247,22 @@ module.exports = async (req, res) => {
       if (key in monthly) monthly[key] += b.fee_pence;
     });
 
-    // Lesson type breakdown
+    // Lesson type breakdown — excludes cancelled, which isn't a real lesson.
     const byType = { gcse: 0, alevel: 0, group: 0, trial: 0 };
-    bookings.forEach(b => { if (b.lesson_type in byType) byType[b.lesson_type]++; });
+    bookings.forEach(b => { if (b.status !== 'cancelled' && b.lesson_type in byType) byType[b.lesson_type]++; });
 
-    // Per-tutor — use ALL bookings for accurate totals
+    // Per-tutor lesson counts exclude cancelled; revenue only counts what
+    // was actually paid (confirmed/completed), same as the headline
+    // totalRevenue above — a scheduled-but-unpaid or declined booking
+    // previously inflated both figures here.
     const tutorMap = {};
     bookings.forEach(b => {
+      if (b.status === 'cancelled') return;
       if (!tutorMap[b.tutor_name]) tutorMap[b.tutor_name] = { lessons: 0, revenue: 0, unpaid: 0 };
       tutorMap[b.tutor_name].lessons++;
-      tutorMap[b.tutor_name].revenue += b.fee_pence;
+      if (b.status === 'confirmed' || b.status === 'completed') {
+        tutorMap[b.tutor_name].revenue += b.fee_pence;
+      }
     });
     // Unpaid = sum of REQUESTED payouts from payouts table (what tutor actually requested)
     // Fall back to calculating from confirmed bookings if no payout request exists
