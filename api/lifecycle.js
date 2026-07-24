@@ -299,7 +299,14 @@ module.exports = async (req, res) => {
           start_time: slotStart.toISOString(),
           duration_mins: b.durationMins || 55,
           fee_pence: feeMap[lessonType] ?? 4000,
-          status: 'confirmed',
+          // Trial lessons are free and confirmed immediately. Paid lessons
+          // start "scheduled" (awaiting payment) — the modal's own copy
+          // already promises this ("we'll charge your saved card / you'll
+          // get a payment link"), but the booking was previously created as
+          // confirmed unconditionally, before charge-student even ran, so a
+          // lesson was booked with zero payment enforcement regardless of
+          // whether the charge succeeded, failed, or was never attempted.
+          status: lessonType === 'trial' ? 'confirmed' : 'scheduled',
           meet_link: meetingLink,
         });
         created.push(booking);
@@ -376,17 +383,37 @@ module.exports = async (req, res) => {
 
       if (customer && savedPM) {
         // ── Charge saved card immediately ────────────────────────────────
-        const pi = await stripe.paymentIntents.create({
-          amount: pricing.amount,
-          currency: 'gbp',
-          customer: customer.id,
-          payment_method: savedPM.id,
-          confirm: true,
-          off_session: true,
-          description: `${pricing.label} — ${studentName} — ${tutorName}`,
-          receipt_email: studentEmail,
-          metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
-        }, { idempotencyKey: `booking-charge:${bookingId}` });
+        let pi;
+        try {
+          pi = await stripe.paymentIntents.create({
+            amount: pricing.amount,
+            currency: 'gbp',
+            customer: customer.id,
+            payment_method: savedPM.id,
+            confirm: true,
+            off_session: true,
+            description: `${pricing.label} — ${studentName} — ${tutorName}`,
+            receipt_email: studentEmail,
+            metadata: { bookingId, lessonType, studentName: studentName || '', tutorName: tutorName || '' },
+          }, { idempotencyKey: `booking-charge:${bookingId}` });
+        } catch (chargeErr) {
+          // A declined card (or any other Stripe charge failure) previously
+          // fell through to the generic 500 below and left the booking's
+          // status untouched — silently stuck as "scheduled" with no
+          // record of the failed attempt, and no clear signal to the
+          // caller beyond a raw Stripe error message.
+          await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+            method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ status: 'payment_failed' }),
+          });
+          if (chargeErr.type === 'StripeCardError') {
+            return res.status(402).json({
+              status: 'failed', error: 'card_declined',
+              message: chargeErr.message, code: chargeErr.code,
+            });
+          }
+          throw chargeErr;
+        }
         // Update booking with payment intent
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
