@@ -6,16 +6,37 @@ const { resolvePrice } = require('../lib/pricing');
 const { isValidId } = require('../lib/validate');
 const { getMeetingLink } = require('../lib/tutors');
 const { rateLimitOrReject, checkRateLimit } = require('../lib/rateLimit');
+const { requireAuth } = require('../lib/auth');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
 
-  // GET — fetch all leads, optional ?status= or ?email=
+  // GET — fetch leads, optional ?status= or ?email=
+  // Every prospective family's name/email/subject/level/goal in one call —
+  // previously reachable with zero auth at all. Scoped by caller: an admin
+  // sees everything, a tutor is restricted server-side to leads assigned to
+  // them (never trusting a client-side filter over the full list), and a
+  // student/parent may only look up their OWN email (used by the portal's
+  // "you have pending times to choose from" check) — not an arbitrary one.
   if (req.method === 'GET') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     const { status, email } = req.query;
     let path = '/leads?order=created_at.desc';
     if (status) path += `&status=eq.${status}`;
-    if (email)  path += `&email=eq.${encodeURIComponent(email)}`;
+    if (caller.role === 'admin') {
+      if (email) path += `&email=eq.${encodeURIComponent(email)}`;
+    } else if (email) {
+      if (email.toLowerCase() !== caller.email.toLowerCase()) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      path += `&email=eq.${encodeURIComponent(email)}`;
+    } else {
+      const profiles = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+      const myTutorName = profiles[0]?.tutor_name;
+      if (!myTutorName) return res.status(403).json({ error: 'Forbidden' });
+      path += `&assigned_tutor=eq.${encodeURIComponent(myTutorName)}`;
+    }
     try {
       return res.status(200).json(await dbGet(path));
     } catch(e) {
@@ -148,10 +169,27 @@ module.exports = async (req, res) => {
   }
 
   // PATCH — update lead status / assign tutor / save proposed slots
+  // CRM write access — assigning a tutor or changing status fires real
+  // emails (and can trigger a real Calendly scheduling link), so this must
+  // never be reachable by an unauthenticated caller. A tutor may update
+  // status/notes on a lead already assigned to them (confirming, proposing
+  // times), but reassigning a lead to a (possibly different) tutor stays
+  // admin-only.
   if (req.method === 'PATCH') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     const { id, status, assignedTutor, notes } = req.body || {};
     if (!id) return res.status(400).json({ error: 'Missing lead id' });
     if (!isValidId(id)) return res.status(400).json({ error: 'Invalid lead id' });
+    if (caller.role !== 'admin') {
+      if (assignedTutor) return res.status(403).json({ error: 'Forbidden' });
+      const profiles = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+      const myTutorName = profiles[0]?.tutor_name;
+      const targetLeads = await dbGet(`/leads?id=eq.${id}&select=assigned_tutor&limit=1`);
+      if (!myTutorName || targetLeads[0]?.assigned_tutor !== myTutorName) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
     const updates = {};
     if (status)        updates.status = status;
     if (assignedTutor) updates.assigned_tutor = assignedTutor;
