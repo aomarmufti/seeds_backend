@@ -134,6 +134,41 @@ test('confirm booking returns a friendly 409 when the student already used their
   assert.match(res.body.error, /trial/);
 });
 
+// This is the PUBLIC homepage wizard's endpoint — under periodic billing,
+// only a free trial/consultation can be booked here at all; paid lessons
+// go through the authenticated portal (api/lifecycle.js?resource=lessons)
+// instead. Without this guard, a direct API call (bypassing the frontend
+// entirely, which no longer offers non-trial options) could still create
+// a paid booking through the public, unauthenticated wizard flow.
+test('confirm booking rejects any lessonType other than trial', async () => {
+  const handler = loadWithMocks('api/bookings.js', {
+    db: { dbGet: async () => [], dbPost: async (p) => (p === '/bookings' ? { id: 'b1' } : { id: 'student1' }) },
+  });
+  const res = makeRes();
+  await handler(confirmReq({ lessonType: 'gcse' }), res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('confirm booking creates the trial as payment_status=free', async () => {
+  let posted;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: {
+      dbGet: async () => [],
+      dbPost: async (p, body) => {
+        if (p === '/bookings') { posted = body; return { id: 'b1' }; }
+        return { id: 'student1' };
+      },
+    },
+    pricing: { resolvePrice: () => ({ duration: 30, amount: 0 }) },
+  });
+  const res = makeRes();
+  await handler(confirmReq(), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(posted.lesson_type, 'trial');
+  assert.equal(posted.fee_pence, 0);
+  assert.equal(posted.payment_status, 'free');
+});
+
 test('confirm booking rejects a request missing required fields', async () => {
   const handler = loadWithMocks('api/bookings.js');
   const res = makeRes();

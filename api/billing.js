@@ -54,6 +54,35 @@ module.exports = async (req, res) => {
     }
   }
 
+  // A family's own periodic billing batches — replaces per-booking payment
+  // status as the source of truth for "what have I actually been charged,
+  // and what do I still owe" now that payment is deferred to the billing
+  // cycle rather than tied to each individual lesson.
+  if (req.method === 'GET' && req.query.resource === 'billing-history') {
+    try {
+      let studentIds;
+      if (caller.role === 'admin' && req.query.studentId) {
+        studentIds = [req.query.studentId];
+      } else {
+        const email = normalizeEmail(caller.email);
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&select=id`);
+        studentIds = students.map(s => s.id);
+      }
+      if (!studentIds.length) return res.status(200).json({ batches: [] });
+      const batches = await dbGet(`/billing_batches?student_id=in.(${studentIds.join(',')})&order=created_at.desc`);
+      return res.status(200).json({
+        batches: batches.map(b => ({
+          id: b.id, cycle: b.cycle,
+          periodStart: b.period_start, periodEnd: b.period_end,
+          totalPence: b.total_pence, status: b.status,
+          paymentLink: b.payment_link, paidAt: b.paid_at,
+        })),
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   let payments;
   try {
     payments = getPaymentService();

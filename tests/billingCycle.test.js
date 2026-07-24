@@ -79,3 +79,29 @@ test('POST billing resource=billing-cycle 404s when the caller has no student re
   await handler({ method: 'POST', body: { resource: 'billing-cycle', billingCycle: 'weekly' } }, res);
   assert.equal(res.statusCode, 404);
 });
+
+test('GET billing?resource=billing-history returns the caller\'s own billing batches', async () => {
+  const handler = loadHandler({
+    dbGetMock: async (p) => {
+      if (p.startsWith('/students?parent_email=eq.')) return [{ id: 'student-1' }];
+      if (p.startsWith('/billing_batches?student_id=in.')) {
+        return [{ id: 'batch-1', cycle: 'weekly', period_start: '2026-07-01', period_end: '2026-07-08', total_pence: 8000, status: 'paid', payment_link: null, paid_at: '2026-07-08' }];
+      }
+      return [];
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'billing-history' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.batches.length, 1);
+  assert.equal(res.body.batches[0].totalPence, 8000);
+  assert.equal(res.body.batches[0].status, 'paid');
+});
+
+test('GET billing?resource=billing-history returns an empty list for a family with no student record', async () => {
+  const handler = loadHandler({ dbGetMock: async () => [] });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'billing-history' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.batches, []);
+});
