@@ -98,7 +98,12 @@ module.exports = async (req, res) => {
   // data as well as the admin panel, so it stays open to any authenticated
   // request rather than admin-only (tightening this further needs the
   // caller's own student/tutor identity threaded through, tracked separately).
+  // The comment above documented that intent, but the requireAuth call
+  // implementing it was missing — every student/parent's name, email,
+  // phone, and Stripe customer id was reachable with zero authentication.
   if (req.query.resource === 'students') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     try {
       const data = await dbGet(
         '/students?select=*,bookings(id,lesson_type,start_time,tutor_name,status)&order=created_at.desc'

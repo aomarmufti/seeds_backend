@@ -54,6 +54,30 @@ test('unknown analytics POST action returns 400', async () => {
   assert.equal(res.statusCode, 400);
 });
 
+// SCRUM-13: this endpoint's own comment documented "any authenticated
+// request" as the intended access model, but the requireAuth call
+// implementing it was missing — every student's name/email/phone/Stripe
+// customer id was reachable with zero authentication.
+test('resource=students requires authentication', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'students' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('resource=students returns data for any authenticated caller', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: { dbGet: async () => [{ id: 's1', student_name: 'S' }] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'students' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.length, 1);
+});
+
 test('resource=my-bookings returns only the caller\'s own bookings, scoped by their email', async () => {
   const handler = loadWithMocks('api/analytics.js', {
     auth: {
