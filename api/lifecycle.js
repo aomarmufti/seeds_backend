@@ -15,6 +15,34 @@ function getStripe() {
   return require('stripe')(process.env.STRIPE_SECRET_KEY);
 }
 
+// SCRUM-13: none of notes/homework/progress/lessons/availability originally
+// checked who was calling — any caller who knew or guessed a studentId could
+// read or write another family's private tutoring data. This resolves
+// whether `caller` is allowed to act on `studentId`: the student's own
+// parent, the tutor actually assigned to them (via a real booking, not a
+// client-supplied tutorName), or an admin.
+async function verifyStudentAccess(caller, studentId) {
+  if (caller.role === 'admin') return true;
+  const students = await dbGet(`/students?id=eq.${studentId}&select=parent_email&limit=1`);
+  const parentEmail = students[0]?.parent_email;
+  if (parentEmail && parentEmail.toLowerCase() === caller.email.toLowerCase()) return true;
+  const callerProfile = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+  const myTutorName = callerProfile[0]?.tutor_name;
+  if (!myTutorName) return false;
+  const bookings = await dbGet(
+    `/bookings?student_id=eq.${studentId}&tutor_name=eq.${encodeURIComponent(myTutorName)}&limit=1`
+  );
+  return bookings.length > 0;
+}
+
+// Same idea for endpoints keyed by tutorName instead of studentId (a
+// tutor's own availability, or a tutor creating a lesson for themselves).
+async function verifyTutorIdentity(caller, tutorName) {
+  if (caller.role === 'admin') return true;
+  const callerProfile = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+  return callerProfile[0]?.tutor_name === tutorName;
+}
+
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   const resource = req.query.resource;
@@ -77,6 +105,73 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ── MATERIALS (SCRUM-25 tutor Resources panel + SCRUM-24 Group Sessions
+  // recordings, descoped to a pasted link — Google Drive/OneDrive/Zoom
+  // recording etc. — rather than real file storage) ───────────────────────
+  if (resource === 'materials') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+
+    if (req.method === 'GET') {
+      const { tutorName, studentId, type } = req.query;
+      try {
+        if (tutorName) {
+          // Tutor's own view of everything they've added.
+          if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+          let path = `/resources?tutor_name=eq.${encodeURIComponent(tutorName)}&order=created_at.desc`;
+          if (type) path += `&type=eq.${encodeURIComponent(type)}`;
+          return res.status(200).json(await dbGet(path));
+        }
+        if (studentId) {
+          // Student's view: their own tutor's materials + anything shared
+          // with all of that tutor's students (student_id is null).
+          if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+          if (!(await verifyStudentAccess(caller, studentId))) return res.status(403).json({ error: 'Forbidden' });
+          let path = `/resources?or=(student_id.eq.${studentId},student_id.is.null)&order=created_at.desc`;
+          if (type) path += `&type=eq.${encodeURIComponent(type)}`;
+          return res.status(200).json(await dbGet(path));
+        }
+        return res.status(400).json({ error: 'tutorName or studentId required' });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    if (req.method === 'POST') {
+      const { tutorName, studentId, type, subject, title, url } = req.body || {};
+      if (!tutorName || !title || !url) return res.status(400).json({ error: 'tutorName, title, and url required' });
+      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+      if (studentId) {
+        if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+        const ownBookings = await dbGet(`/bookings?student_id=eq.${studentId}&tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
+        if (!ownBookings.length) return res.status(403).json({ error: 'Forbidden' });
+      }
+      try {
+        const created = await dbPost('/resources', {
+          tutor_name: tutorName,
+          student_id: studentId || null,
+          type: type === 'recording' ? 'recording' : 'resource',
+          subject: subject || null,
+          title, url,
+        });
+        return res.status(201).json({ success: true, record: created });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    if (req.method === 'DELETE') {
+      const { id, tutorName } = req.query;
+      if (!id || !isValidId(id)) return res.status(400).json({ error: 'Invalid id' });
+      if (!tutorName || !(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+      try {
+        const r = await supabaseRequest(`/resources?id=eq.${id}&tutor_name=eq.${encodeURIComponent(tutorName)}`, {
+          method: 'DELETE', prefer: 'return=minimal',
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
   if (resource === 'auto-payout') {
     if (!requireCronSecret(req, res)) return;
@@ -128,11 +223,20 @@ module.exports = async (req, res) => {
   }
 
   // ── LESSONS — tutor creates a booking directly ────────────────────────
+  // Called by both the student portal (booking a lesson for themselves) and
+  // the tutor portal (adding a lesson for one of their students), so the
+  // caller must be either the named tutor or that student's own parent.
   if (resource === 'lessons') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
     const b = req.body || {};
     if (!b.studentId || !b.tutorName || !b.startTime) {
       return res.status(400).json({ error: 'studentId, tutorName, startTime required' });
+    }
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const isTutor = await verifyTutorIdentity(caller, b.tutorName);
+    if (!isTutor && !(await verifyStudentAccess(caller, b.studentId))) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
     try {
       const meetingLink = await getMeetingLink(b.tutorName);
@@ -190,19 +294,48 @@ module.exports = async (req, res) => {
   }
 
   // ── CHARGE STUDENT for a booking ─────────────────────────────────────────
+  // Previously trusted whatever studentEmail/lessonType/amount-determining
+  // fields the caller sent, with no auth at all — meaning any caller who
+  // knew (or guessed) a bookingId could direct a real charge at an
+  // arbitrary email's saved card, for an amount they chose via lessonType/
+  // studentLevel, tagged with a bookingId of their choosing. Now the
+  // booking is the source of truth: only bookingId is trusted from the
+  // request, everything else (who's charged, how much, for what) is looked
+  // up from the real record.
   if (resource === 'charge-student') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-    const { bookingId, studentEmail, lessonType, studentLevel, studentName, tutorName, subject, startTime } = req.body || {};
-    if (!bookingId || !studentEmail) return res.status(400).json({ error: 'bookingId and studentEmail required' });
+    const { bookingId } = req.body || {};
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
     if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
+
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+
+    const bookingRows = await dbGet(`/bookings?id=eq.${bookingId}&select=*,students(student_name,parent_email)&limit=1`);
+    const booking = bookingRows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    // Either the tutor charging their student (no saved card on file) or
+    // the student themselves proactively paying a pending charge.
+    const isTutor = await verifyTutorIdentity(caller, booking.tutor_name);
+    if (!isTutor && !(await verifyStudentAccess(caller, booking.student_id))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const tutorName = booking.tutor_name;
+    const subject = booking.subject;
+    const startTime = booking.start_time;
+    const studentName = booking.students?.student_name;
+    const studentEmail = booking.students?.parent_email;
+    if (!studentEmail) return res.status(400).json({ error: 'No parent email on file for this booking' });
 
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
 
-    const pricing = resolvePrice(lessonType, studentLevel);
+    const pricing = resolvePrice(booking.lesson_type, booking.lesson_type);
     if (pricing.amount === 0) {
       return res.status(200).json({ status: 'free', message: 'Free lesson — no charge needed' });
     }
+    const lessonType = booking.lesson_type;
 
     try {
       // Check if student has a saved Stripe customer + card
@@ -333,10 +466,15 @@ module.exports = async (req, res) => {
   }
 
   // ── AVAILABILITY (tutor saves their available slots) ─────────────────────
+  // Previously anyone who knew a tutor's name could read or overwrite their
+  // schedule — now the caller must be that tutor (or an admin).
   if (resource === 'availability') {
     if (req.method === 'GET') {
       const { tutorName } = req.query;
       if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+      const caller = await requireAuth(req, res);
+      if (!caller) return;
+      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
       try {
         const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
         return res.status(200).json({ slots: profiles[0]?.availability || [] });
@@ -345,6 +483,9 @@ module.exports = async (req, res) => {
     if (req.method === 'POST') {
       const { tutorName, slots } = req.body || {};
       if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+      const caller = await requireAuth(req, res);
+      if (!caller) return;
+      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
       try {
         const r = await supabaseRequest(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}`, {
           method: 'PATCH', prefer: 'return=minimal',
@@ -359,14 +500,20 @@ module.exports = async (req, res) => {
   // ── PROGRESS HISTORY (trend over time) ───────────────────────────────────
   if (resource === 'progress-history') {
     if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
-    const { studentId, studentEmail, subject } = req.query;
+    const { studentId, subject } = req.query;
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     let sid = studentId;
-    if (!sid && studentEmail) {
-      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(studentEmail)}&limit=1`);
+    if (!sid) {
+      // Resolve from the caller's own email rather than trusting a
+      // client-supplied studentEmail, which would let anyone look up
+      // another parent's progress history just by knowing their email.
+      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
       sid = students[0]?.id;
     }
-    if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
+    if (!sid) return res.status(400).json({ error: 'studentId required' });
     if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
+    if (!(await verifyStudentAccess(caller, sid))) return res.status(403).json({ error: 'Forbidden' });
     try {
       let path = `/progress_history?student_id=eq.${sid}&order=created_at.asc`;
       if (subject) path += `&subject=eq.${encodeURIComponent(subject)}`;
@@ -537,19 +684,31 @@ module.exports = async (req, res) => {
 
   const table = resource === 'notes' ? 'lesson_notes' : resource;
 
+  // Previously none of notes/homework/progress checked who was calling —
+  // any caller who knew or guessed a studentId could read or write another
+  // family's private tutoring data (SCRUM-13).
+  const caller = await requireAuth(req, res);
+  if (!caller) return;
+
   try {
     // ── GET — list by student ─────────────────────────────────────────
     if (req.method === 'GET') {
       const { studentId, studentEmail } = req.query;
       let sid = studentId;
-      // Allow lookup by email (student portal doesn't know its student_id)
+      // Allow lookup by email, but only the caller's OWN email — otherwise
+      // anyone could read another family's notes/homework/progress just by
+      // knowing their email address.
       if (!sid && studentEmail) {
+        if (studentEmail.toLowerCase() !== caller.email.toLowerCase() && caller.role !== 'admin') {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
         const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(studentEmail)}&limit=1`);
         if (!students.length) return res.status(200).json([]);
         sid = students[0].id;
       }
       if (!sid) return res.status(400).json({ error: 'studentId or studentEmail required' });
       if (!isValidId(sid)) return res.status(400).json({ error: 'Invalid studentId' });
+      if (!(await verifyStudentAccess(caller, sid))) return res.status(403).json({ error: 'Forbidden' });
 
       let order = 'created_at.desc';
       if (resource === 'progress') order = 'updated_at.desc';
@@ -560,6 +719,20 @@ module.exports = async (req, res) => {
     // ── POST — create ─────────────────────────────────────────────────
     if (req.method === 'POST') {
       const body = req.body || {};
+      // Only the student's actual assigned tutor (or an admin) can set
+      // notes/homework/progress — a parent viewing their own child's data
+      // is a different privilege from a tutor writing to it.
+      if (caller.role !== 'admin') {
+        if (!body.studentId || !isValidId(body.studentId)) {
+          return res.status(400).json({ error: 'Invalid studentId' });
+        }
+        const callerProfile = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+        const myTutorName = callerProfile[0]?.tutor_name;
+        const ownBookings = myTutorName
+          ? await dbGet(`/bookings?student_id=eq.${body.studentId}&tutor_name=eq.${encodeURIComponent(myTutorName)}&limit=1`)
+          : [];
+        if (!ownBookings.length) return res.status(403).json({ error: 'Forbidden' });
+      }
       let record;
 
       if (resource === 'notes') {
@@ -687,6 +860,14 @@ module.exports = async (req, res) => {
       const { id } = req.body || {};
       if (!id) return res.status(400).json({ error: 'id required' });
       if (!isValidId(id)) return res.status(400).json({ error: 'Invalid id' });
+      // The row's own student_id is the source of truth for ownership —
+      // called by both the tutor (marking things) and the student's parent
+      // (marking homework complete), so check against whichever student
+      // this specific row actually belongs to rather than trusting the body.
+      const existingRows = await dbGet(`/${table}?id=eq.${id}&select=student_id&limit=1`);
+      const rowStudentId = existingRows[0]?.student_id;
+      if (!rowStudentId) return res.status(404).json({ error: 'Not found' });
+      if (!(await verifyStudentAccess(caller, rowStudentId))) return res.status(403).json({ error: 'Forbidden' });
       const updates = {};
       if (resource === 'homework') {
         if (typeof req.body.completed === 'boolean') {
