@@ -59,6 +59,29 @@ module.exports = async (req, res) => {
   // the misleading self-check; verify RLS via Supabase Dashboard → Advisors instead.
   report.security = { rls: 'Not checked here — this endpoint uses the service key, which bypasses RLS. Verify via Supabase Dashboard → Advisors.' };
 
+  // 6. Business health signals (SCRUM-46) — reuses data already being
+  // collected rather than standing up a separate paid monitoring service.
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const [bookingsToday, failedThisWeek, pendingPayouts, recentWebhooks] = await Promise.all([
+      dbGet(`/bookings?start_time=gte.${todayStart}&status=neq.cancelled&select=id`),
+      dbGet(`/bookings?status=eq.payment_failed&created_at=gte.${weekAgo}&select=id`),
+      dbGet(`/payouts?status=eq.requested&select=amount_pence`),
+      dbGet(`/stripe_webhook_events?received_at=gte.${weekAgo}&select=event_id&limit=1`),
+    ]);
+    report.stats = {
+      bookingsToday: bookingsToday.length,
+      paymentFailuresLast7Days: failedThisWeek.length,
+      pendingPayoutsCount: pendingPayouts.length,
+      pendingPayoutsPence: pendingPayouts.reduce((s, p) => s + p.amount_pence, 0),
+      stripeWebhooksReceivedLast7Days: recentWebhooks.length > 0 ? '✓ receiving events' : '⚠ none received — check Stripe webhook config if this is unexpected',
+    };
+  } catch (e) {
+    report.stats = { error: e.message };
+  }
+
   const problems = [
     ...Object.values(report.env), ...Object.values(report.database),
     ...Object.values(report.stripe),
