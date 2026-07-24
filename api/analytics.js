@@ -286,7 +286,12 @@ module.exports = async (req, res) => {
       tutors: tutorMap,
       studentCount: students.length,
       bookingCount: bookings.length,
-      recentBookings: bookings.slice(0, 25).map(b => ({
+      // Not capped — the admin Bookings tab is meant to be the full log of
+      // every lesson (scheduled/confirmed/completed/payment_failed/
+      // cancelled), not just the most recent 25. The data is already
+      // fetched in full above; slicing it here just meant older bookings
+      // silently disappeared from admin's own view of the business.
+      recentBookings: bookings.map(b => ({
         id: b.id,
         studentName: b.students?.student_name || '—',
         tutorName: b.tutor_name,
