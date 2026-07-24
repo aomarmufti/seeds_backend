@@ -126,6 +126,54 @@ test('checkout.session.completed confirms the booking and sends the confirmation
   assert.equal(emailSent.parentEmail, 'p@example.com');
 });
 
+test('payment_intent.succeeded with a billingBatchId marks the batch and its bookings paid, not a single booking', async () => {
+  const patches = [];
+  const handler = loadWebhookHandler({
+    event: {
+      id: 'evt_batch_1', type: 'payment_intent.succeeded',
+      data: { object: { id: 'pi_batch_1', amount: 8500, metadata: { billingBatchId: 'batch-1' } } },
+    },
+    dbMock: async (path, opts) => {
+      if (path === '/stripe_webhook_events') return { ok: true, json: async () => ({}) };
+      patches.push({ path, body: JSON.parse(opts.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  const res = makeRes();
+  await handler(makeReq(), res);
+  assert.equal(res.statusCode, 200);
+  const batchPatch = patches.find(p => p.path.startsWith('/billing_batches?id=eq.batch-1'));
+  assert.ok(batchPatch, 'should patch the billing_batches row, not a bookings row');
+  assert.equal(batchPatch.body.status, 'paid');
+  assert.equal(batchPatch.body.stripe_payment_intent_id, 'pi_batch_1');
+  const bookingsPatch = patches.find(p => p.path === '/bookings?billing_batch_id=eq.batch-1');
+  assert.ok(bookingsPatch, 'should mark every booking in the batch paid');
+  assert.equal(bookingsPatch.body.payment_status, 'paid');
+});
+
+test('checkout.session.completed with a billingBatchId marks the batch paid via the checkout session\'s payment_intent', async () => {
+  const patches = [];
+  const handler = loadWebhookHandler({
+    event: {
+      id: 'evt_batch_2', type: 'checkout.session.completed',
+      data: { object: { id: 'cs_batch_1', payment_intent: 'pi_batch_2', metadata: { billingBatchId: 'batch-2' } } },
+    },
+    dbMock: async (path, opts) => {
+      if (path === '/stripe_webhook_events') return { ok: true, json: async () => ({}) };
+      patches.push({ path, body: JSON.parse(opts.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  const res = makeRes();
+  await handler(makeReq(), res);
+  assert.equal(res.statusCode, 200);
+  const batchPatch = patches.find(p => p.path.startsWith('/billing_batches?id=eq.batch-2'));
+  assert.equal(batchPatch.body.status, 'paid');
+  assert.equal(batchPatch.body.stripe_payment_intent_id, 'pi_batch_2');
+  const bookingsPatch = patches.find(p => p.path === '/bookings?billing_batch_id=eq.batch-2');
+  assert.equal(bookingsPatch.body.payment_status, 'paid');
+});
+
 test('checkout.session.completed does not crash if the confirmation email fails', async () => {
   const handler = loadWebhookHandler({
     event: {

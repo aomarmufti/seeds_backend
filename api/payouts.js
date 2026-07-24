@@ -46,7 +46,7 @@ module.exports = async (req, res) => {
         // computed elsewhere (api/analytics.js) from confirmed/completed
         // only, this is just visibility.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(scheduled,payment_failed,confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,students(student_name)&order=start_time.desc`
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(scheduled,payment_failed,confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,payment_status,stripe_payment_intent_id,students(student_name)&order=start_time.desc`
         );
         return res.status(200).json(bookings);
       } catch(e) { return res.status(500).json({ error: e.message }); }
@@ -163,8 +163,13 @@ module.exports = async (req, res) => {
       });
       const stripe = getStripe();
       try {
+        // Only mark a booking "tutor paid out" if the student has actually
+        // paid for it (payment_status='paid') — under periodic billing a
+        // booking is confirmed the moment it's made regardless of billing
+        // status, so status=confirmed alone (the old check) would let an
+        // admin pay a tutor out for lessons never actually charged.
         await supabaseRequest(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&fee_pence=gt.0`,
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`,
           { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
         );
         let transferId = null, transferStatus = 'manual';

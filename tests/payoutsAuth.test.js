@@ -123,3 +123,27 @@ test('POST payouts approve-and-transfer is unaffected — still admin-gated as b
   await handler({ method: 'POST', body: { action: 'approve-and-transfer', tutorName: 'Azeem Omar-Mufti', amountPence: 10000 } }, res);
   assert.equal(res.statusCode, 401);
 });
+
+// Periodic billing means a booking's own status is 'confirmed' the moment
+// it's made, regardless of whether the family has actually been charged
+// yet — so marking a booking "tutor paid out" (status -> 'completed') must
+// also require payment_status='paid', or an admin could pay a tutor out of
+// money that was never actually collected from the family.
+test('POST payouts approve-and-transfer only completes bookings the student has actually paid for', async () => {
+  let queriedPath;
+  const handler = loadWithMocks('api/payouts.js', {
+    auth: { requireAdmin: async () => ({ id: 'admin-1', email: 'admin@example.com', role: 'admin' }) },
+    db: {
+      supabaseRequest: async (p) => {
+        if (p.startsWith('/bookings?')) queriedPath = p;
+        return { ok: true, json: async () => ({}) };
+      },
+      dbGet: async () => [],
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'approve-and-transfer', tutorName: 'Azeem Omar-Mufti', amountPence: 10000 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(queriedPath.includes('status=eq.confirmed'));
+  assert.ok(queriedPath.includes('payment_status=eq.paid'), 'must not complete a booking the family has not paid for yet');
+});

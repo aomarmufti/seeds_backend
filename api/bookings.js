@@ -184,8 +184,7 @@ module.exports = async (req, res) => {
 
   // ── Confirm booking ───────────────────────────────────────────────────────
   if (action === 'confirm' || (!action && req.method === 'POST')) {
-    // Unauthenticated, creates a real booking (and, for paid lessons, an
-    // associated charge) — throttle abuse (SCRUM-20).
+    // Unauthenticated, creates a real booking — throttle abuse (SCRUM-20).
     if (!(await rateLimitOrReject(req, res, 'bookings-confirm', { max: 5, windowSeconds: 900 }))) return;
     try {
       const {
@@ -197,7 +196,18 @@ module.exports = async (req, res) => {
       if (!parentEmail || !startTime || !tutorName)
         return res.status(400).json({ error: 'Missing required fields' });
 
-      const pricing = resolvePrice(lessonType, studentLevel);
+      // This is the PUBLIC, unauthenticated homepage wizard's endpoint —
+      // it only ever offers a free trial lesson/consultation now. Paid
+      // lessons are booked (and billed automatically on the family's own
+      // billing cycle) through the authenticated portal instead, via
+      // api/lifecycle.js?resource=lessons. Rejecting anything else here
+      // closes the gap a direct API call could otherwise use to create a
+      // paid booking without ever going through the portal.
+      if (lessonType && lessonType !== 'trial') {
+        return res.status(400).json({ error: 'Only free trial lessons can be booked here — paid lessons are booked from your Student Portal.' });
+      }
+
+      const pricing = resolvePrice('trial', studentLevel);
       const meetingLink = await getMeetingLink(tutorName);
 
       // Conflict check — prevent double-booking a tutor
@@ -225,10 +235,11 @@ module.exports = async (req, res) => {
             student_name: studentName,
             stripe_customer_id: customerId || null,
           });
-      // Paid lessons create a Stripe customer client-side (create-setup-intent)
-      // before reaching this endpoint, but nothing previously persisted that
-      // id back onto the student record — meaning saved cards could never be
-      // listed for anyone afterwards, on a first booking or any later one.
+      // A caller-supplied Stripe customer id (e.g. one already created via
+      // the student portal's own billing?resource=setup-intent) wasn't
+      // previously persisted back onto an EXISTING student record — only
+      // ever set on brand-new ones — meaning saved cards could never be
+      // listed for anyone afterwards on a family's second+ booking.
       if (customerId && existing.length && !student.stripe_customer_id) {
         await dbPatch(`/students?id=eq.${student.id}`, { stripe_customer_id: customerId });
         student.stripe_customer_id = customerId;
@@ -237,12 +248,13 @@ module.exports = async (req, res) => {
       await dbPost('/bookings', {
         student_id: student.id,
         tutor_name: tutorName, subject,
-        lesson_type: lessonType || 'trial',
+        lesson_type: 'trial',
         start_time: startTime,
         duration_mins: pricing.duration,
         fee_pence: pricing.amount,
         stripe_payment_intent_id: paymentIntentId || null,
         status: 'confirmed',
+        payment_status: 'free',
         meet_link: meetingLink,
       });
 

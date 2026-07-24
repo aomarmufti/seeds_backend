@@ -89,10 +89,10 @@ test('rejects a Calendly request with an invalid signature', async () => {
   assert.equal(res.statusCode, 400);
 });
 
-test('invitee.created for a paid lesson creates a scheduled booking and a checkout session', async () => {
+test('invitee.created for a paid lesson confirms the booking immediately, deferred to periodic billing', async () => {
   const posted = [];
-  let checkoutCreated = null;
-  let paymentLinkEmail = null;
+  let checkoutCreated = false;
+  let confirmationSent = false;
   const raw = JSON.stringify(inviteeCreatedBody());
   const handler = loadHandler({
     rawBody: raw,
@@ -104,24 +104,22 @@ test('invitee.created for a paid lesson creates a scheduled booking and a checko
     },
     dbPostMock: async (p, b) => { posted.push({ p, b }); return { id: 'booking-1', ...b }; },
     dbMock: async () => ({ ok: true, json: async () => ({}) }),
-    paymentsMock: {
-      createCheckoutSession: async (params) => { checkoutCreated = params; return { id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' }; },
-    },
-    remindersMock: { sendPaymentLink: async (params) => { paymentLinkEmail = params; } },
+    paymentsMock: { createCheckoutSession: async () => { checkoutCreated = true; return {}; } },
+    remindersMock: { sendBookingConfirmation: async () => { confirmationSent = true; } },
   });
   const res = makeRes();
   await handler({ method: 'POST', headers: { 'calendly-webhook-signature': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);
   const bookingInsert = posted.find(p => p.p === '/bookings');
   assert.ok(bookingInsert, 'should insert a bookings row');
-  assert.equal(bookingInsert.b.status, 'scheduled');
+  assert.equal(bookingInsert.b.status, 'confirmed', 'booking confirms immediately regardless of lesson type');
+  assert.equal(bookingInsert.b.payment_status, 'unbilled', 'payment is deferred to the family\'s periodic billing cycle');
   assert.equal(bookingInsert.b.tutor_name, 'Azeem');
-  assert.ok(checkoutCreated, 'should create a checkout session for a paid lesson');
-  assert.equal(checkoutCreated.metadata.bookingId, 'booking-1');
-  assert.ok(paymentLinkEmail, 'should email the payment link');
+  assert.equal(checkoutCreated, false, 'must not create a per-lesson checkout session — periodic billing replaces it');
+  assert.equal(confirmationSent, true, 'should send the booking confirmation immediately, same as a free trial');
 });
 
-test('invitee.created for a free trial confirms the booking directly, no checkout', async () => {
+test('invitee.created for a free trial confirms the booking directly, marked payment_status=free', async () => {
   const posted = [];
   let checkoutCreated = false;
   let confirmationSent = false;
@@ -145,6 +143,7 @@ test('invitee.created for a free trial confirms the booking directly, no checkou
   assert.equal(res.statusCode, 200);
   const bookingInsert = posted.find(p => p.p === '/bookings');
   assert.equal(bookingInsert.b.status, 'confirmed');
+  assert.equal(bookingInsert.b.payment_status, 'free');
   assert.equal(bookingInsert.b.fee_pence, 0);
   assert.equal(checkoutCreated, false, 'must not create a checkout session for a free trial');
   assert.equal(confirmationSent, true);
