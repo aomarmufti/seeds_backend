@@ -6,7 +6,7 @@ const { applyCors } = require('../lib/cors');
 const { resolvePrice } = require('../lib/pricing');
 const { sendBookingConfirmation, sendLessonReminder } = require('../lib/reminders');
 const { generateICS } = require('../lib/calendar');
-const { dbPost, dbGet } = require('../lib/db');
+const { dbPost, dbGet, dbPatch } = require('../lib/db');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { getMeetingLink } = require('../lib/tutors');
 const { createSchedulingLink, getScheduledEvent } = require('../lib/calendly');
@@ -190,7 +190,7 @@ module.exports = async (req, res) => {
       const {
         studentName, parentName, parentEmail, parentPhone,
         tutorName, subject, lessonType, studentLevel,
-        startTime, paymentIntentId,
+        startTime, paymentIntentId, customerId,
       } = req.body || {};
 
       if (!parentEmail || !startTime || !tutorName)
@@ -221,7 +221,16 @@ module.exports = async (req, res) => {
             parent_email: parentEmail,
             parent_phone: parentPhone || null,
             student_name: studentName,
+            stripe_customer_id: customerId || null,
           });
+      // Paid lessons create a Stripe customer client-side (create-setup-intent)
+      // before reaching this endpoint, but nothing previously persisted that
+      // id back onto the student record — meaning saved cards could never be
+      // listed for anyone afterwards, on a first booking or any later one.
+      if (customerId && existing.length && !student.stripe_customer_id) {
+        await dbPatch(`/students?id=eq.${student.id}`, { stripe_customer_id: customerId });
+        student.stripe_customer_id = customerId;
+      }
 
       await dbPost('/bookings', {
         student_id: student.id,
