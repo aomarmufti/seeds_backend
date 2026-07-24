@@ -11,8 +11,23 @@ function mockModule(relPath, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly } = {}) {
+// For real npm packages (resolved by name, not relative to backendRoot) —
+// several api/*.js handlers call nodemailer directly rather than through
+// lib/reminders.js, so without this any test reaching those code paths
+// attempts a real SMTP connection and hangs against this sandbox's network
+// restrictions instead of failing fast.
+function mockPackage(pkgName, exportsObj) {
+  const resolved = require.resolve(pkgName);
+  require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
+}
+
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly, nodemailer } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
+
+  mockPackage('nodemailer', {
+    createTransport: () => ({ sendMail: async () => ({}) }),
+    ...nodemailer,
+  });
 
   mockModule('lib/db.js', {
     dbGet: async () => [],
