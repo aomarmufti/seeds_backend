@@ -2,7 +2,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
 const { getPaymentService } = require('../lib/payments');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 
@@ -138,7 +138,7 @@ module.exports = async (req, res) => {
     if (!caller) return;
     try {
       const students = await dbGet(
-        `/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id,stripe_customer_id`
+        `/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id,stripe_customer_id`
       );
       if (!students.length) return res.status(200).json({ recentBookings: [] });
       const studentIds = students.map(s => s.id);

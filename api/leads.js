@@ -3,7 +3,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 const { getMeetingLink } = require('../lib/tutors');
 const { rateLimitOrReject, checkRateLimit } = require('../lib/rateLimit');
 const { requireAuth } = require('../lib/auth');
@@ -25,12 +25,12 @@ module.exports = async (req, res) => {
     let path = '/leads?order=created_at.desc';
     if (status) path += `&status=eq.${status}`;
     if (caller.role === 'admin') {
-      if (email) path += `&email=eq.${encodeURIComponent(email)}`;
+      if (email) path += `&email=eq.${encodeURIComponent(normalizeEmail(email))}`;
     } else if (email) {
-      if (email.toLowerCase() !== caller.email.toLowerCase()) {
+      if (normalizeEmail(email) !== normalizeEmail(caller.email)) {
         return res.status(403).json({ error: 'Forbidden' });
       }
-      path += `&email=eq.${encodeURIComponent(email)}`;
+      path += `&email=eq.${encodeURIComponent(normalizeEmail(caller.email))}`;
     } else {
       const profiles = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
       const myTutorName = profiles[0]?.tutor_name;
@@ -71,13 +71,14 @@ module.exports = async (req, res) => {
 
         // Upsert student
         let student;
-        const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(lead.email)}&limit=1`);
+        const leadEmail = normalizeEmail(lead.email);
+        const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(leadEmail)}&limit=1`);
         if (existing.length) {
           student = existing[0];
         } else {
           student = await dbPost('/students', {
             parent_name: lead.name,
-            parent_email: lead.email,
+            parent_email: leadEmail,
             student_name: lead.name,
           });
         }
@@ -146,7 +147,7 @@ module.exports = async (req, res) => {
     }
     try {
       const lead = await dbPost('/leads', {
-        name, email, subject, level,
+        name, email: normalizeEmail(email), subject, level,
         goal: goal || null,
         availability: availability || [],
         status: 'new',

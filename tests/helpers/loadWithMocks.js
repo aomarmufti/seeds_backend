@@ -62,6 +62,7 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
   // like 'lead1' instead of real UUIDs.
   mockModule('lib/validate.js', {
     isValidId: () => true,
+    normalizeEmail: (email) => (email || '').trim().toLowerCase(),
     ...validate,
   });
   mockModule('lib/tutors.js', {
