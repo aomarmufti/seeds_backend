@@ -1,7 +1,7 @@
 // api/payouts.js — payouts + Stripe Connect for real tutor payments
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
-const { requireAdmin } = require('../lib/auth');
+const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { logError, alertCritical } = require('../lib/logger');
 
@@ -20,13 +20,25 @@ async function getTutorAccount(tutorName) {
   }
 }
 
+// Real earnings/payout data and, further down, the ability to point a
+// tutor's future payouts at an arbitrary Stripe account — previously
+// reachable by anyone with zero authentication at all.
+async function verifyTutorIdentity(caller, tutorName) {
+  if (caller.role === 'admin') return true;
+  const profiles = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+  return profiles[0]?.tutor_name === tutorName;
+}
+
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
 
   if (req.method === 'GET') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     const { tutor, resource } = req.query;
 
     if (resource === 'verify' && tutor) {
+      if (!(await verifyTutorIdentity(caller, tutor))) return res.status(403).json({ error: 'Forbidden' });
       try {
         // Includes scheduled/payment_failed alongside confirmed/completed so
         // a tutor can see a lesson's payment status read-only even before
@@ -41,6 +53,7 @@ module.exports = async (req, res) => {
     }
 
     if (resource === 'connect-status' && tutor) {
+      if (!(await verifyTutorIdentity(caller, tutor))) return res.status(403).json({ error: 'Forbidden' });
       try {
         const acct = await getTutorAccount(tutor);
         if (!acct || !acct.stripe_account_id) {
@@ -72,6 +85,12 @@ module.exports = async (req, res) => {
       }
     }
 
+    if (tutor) {
+      if (!(await verifyTutorIdentity(caller, tutor))) return res.status(403).json({ error: 'Forbidden' });
+    } else if (caller.role !== 'admin') {
+      // No tutor filter means "list every payout" — admin-only.
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     let path = '/payouts?order=requested_at.desc';
     if (tutor) path += `&tutor_name=eq.${encodeURIComponent(tutor)}`;
     try {
@@ -84,9 +103,14 @@ module.exports = async (req, res) => {
     const { action, tutorName } = body;
 
     if (action === 'create-connect-account') {
+      if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+      const caller = await requireAuth(req, res);
+      if (!caller) return;
+      // Points a tutor's future payouts at a Stripe account — must only ever
+      // be that tutor themselves (or an admin), never an arbitrary caller.
+      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
       const stripe = getStripe();
       if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
-      if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
       try {
         let acct = await getTutorAccount(tutorName);
         let accountId = acct && acct.stripe_account_id;
@@ -184,6 +208,9 @@ module.exports = async (req, res) => {
     if (!tutorName || !body.amountPence || body.amountPence < 5000) {
       return res.status(400).json({ error: 'Minimum payout £50' });
     }
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const payout = await dbPost('/payouts', { tutor_name: tutorName, amount_pence: body.amountPence, status: 'requested' });
       return res.status(201).json({ success: true, payout });
