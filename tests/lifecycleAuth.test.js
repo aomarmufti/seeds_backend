@@ -166,6 +166,46 @@ test('resource=lessons allows the named tutor even with no prior booking (first-
   assert.equal(res.statusCode, 201);
 });
 
+test('resource=lessons self-heals a missing students row for a student/parent booking their own first lesson', async () => {
+  let posted;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => parentCaller },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: null }];
+        if (path.startsWith('/students?parent_email=eq.')) return [];
+        if (path.startsWith('/bookings?tutor_name=eq.')) return [];
+        return [];
+      },
+      dbPost: async (path, body) => {
+        if (path === '/students') { posted = body; return { id: 'new-student-1' }; }
+        return { id: 'booking-1', student_id: body.student_id };
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString(), studentName: 'Jamie' },
+  }, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(posted.parent_email, 'parent@example.com');
+  assert.equal(res.body.bookings[0].student_id, 'new-student-1');
+});
+
+test('resource=lessons requires studentId when the caller is the tutor themselves', async () => {
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: { dbGet: async (path) => path.startsWith('/profiles?id=eq.') ? [{ tutor_name: 'Azeem Omar-Mufti' }] : [] },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 400);
+});
+
 // ── availability ─────────────────────────────────────────────────────────
 test('resource=availability GET rejects a caller who is not that tutor', async () => {
   const handler = loadWithMocks('api/lifecycle.js', {

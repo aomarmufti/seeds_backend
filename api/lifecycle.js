@@ -43,6 +43,21 @@ async function verifyTutorIdentity(caller, tutorName) {
   return callerProfile[0]?.tutor_name === tutorName;
 }
 
+// A logged-in student/parent booking their own first lesson from the portal
+// has no `students` row yet (that's normally created by the public booking
+// wizard or a tutor/admin) — self-heal it from the caller's OWN verified
+// email rather than blocking booking with "contact your tutor", matching
+// what the public wizard already does for a brand-new family.
+async function findOrCreateOwnStudentRecord(caller, studentName) {
+  const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+  if (existing.length) return existing[0];
+  return dbPost('/students', {
+    parent_name: studentName || caller.email,
+    parent_email: caller.email,
+    student_name: studentName || caller.email,
+  });
+}
+
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   const resource = req.query.resource;
@@ -229,13 +244,22 @@ module.exports = async (req, res) => {
   if (resource === 'lessons') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
     const b = req.body || {};
-    if (!b.studentId || !b.tutorName || !b.startTime) {
-      return res.status(400).json({ error: 'studentId, tutorName, startTime required' });
+    if (!b.tutorName || !b.startTime) {
+      return res.status(400).json({ error: 'tutorName, startTime required' });
     }
     const caller = await requireAuth(req, res);
     if (!caller) return;
     const isTutor = await verifyTutorIdentity(caller, b.tutorName);
-    if (!isTutor && !(await verifyStudentAccess(caller, b.studentId))) {
+    let studentId = b.studentId;
+    if (!studentId) {
+      // A tutor must name which student they're booking for; a student/
+      // parent booking their own lesson doesn't need to (and can't be
+      // trusted to) supply someone else's studentId — self-heal to their
+      // own record instead of requiring it upfront.
+      if (isTutor) return res.status(400).json({ error: 'studentId required' });
+      const own = await findOrCreateOwnStudentRecord(caller, b.studentName);
+      studentId = own.id;
+    } else if (!isTutor && !(await verifyStudentAccess(caller, studentId))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
     try {
@@ -267,7 +291,7 @@ module.exports = async (req, res) => {
           continue;
         }
         const booking = await dbPost('/bookings', {
-          student_id: b.studentId,
+          student_id: studentId,
           tutor_name: b.tutorName,
           subject: b.subject || null,
           lesson_type: lessonType,
