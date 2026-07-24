@@ -105,6 +105,73 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ── MATERIALS (SCRUM-25 tutor Resources panel + SCRUM-24 Group Sessions
+  // recordings, descoped to a pasted link — Google Drive/OneDrive/Zoom
+  // recording etc. — rather than real file storage) ───────────────────────
+  if (resource === 'materials') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+
+    if (req.method === 'GET') {
+      const { tutorName, studentId, type } = req.query;
+      try {
+        if (tutorName) {
+          // Tutor's own view of everything they've added.
+          if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+          let path = `/resources?tutor_name=eq.${encodeURIComponent(tutorName)}&order=created_at.desc`;
+          if (type) path += `&type=eq.${encodeURIComponent(type)}`;
+          return res.status(200).json(await dbGet(path));
+        }
+        if (studentId) {
+          // Student's view: their own tutor's materials + anything shared
+          // with all of that tutor's students (student_id is null).
+          if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+          if (!(await verifyStudentAccess(caller, studentId))) return res.status(403).json({ error: 'Forbidden' });
+          let path = `/resources?or=(student_id.eq.${studentId},student_id.is.null)&order=created_at.desc`;
+          if (type) path += `&type=eq.${encodeURIComponent(type)}`;
+          return res.status(200).json(await dbGet(path));
+        }
+        return res.status(400).json({ error: 'tutorName or studentId required' });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    if (req.method === 'POST') {
+      const { tutorName, studentId, type, subject, title, url } = req.body || {};
+      if (!tutorName || !title || !url) return res.status(400).json({ error: 'tutorName, title, and url required' });
+      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+      if (studentId) {
+        if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+        const ownBookings = await dbGet(`/bookings?student_id=eq.${studentId}&tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
+        if (!ownBookings.length) return res.status(403).json({ error: 'Forbidden' });
+      }
+      try {
+        const created = await dbPost('/resources', {
+          tutor_name: tutorName,
+          student_id: studentId || null,
+          type: type === 'recording' ? 'recording' : 'resource',
+          subject: subject || null,
+          title, url,
+        });
+        return res.status(201).json({ success: true, record: created });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    if (req.method === 'DELETE') {
+      const { id, tutorName } = req.query;
+      if (!id || !isValidId(id)) return res.status(400).json({ error: 'Invalid id' });
+      if (!tutorName || !(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
+      try {
+        const r = await supabaseRequest(`/resources?id=eq.${id}&tutor_name=eq.${encodeURIComponent(tutorName)}`, {
+          method: 'DELETE', prefer: 'return=minimal',
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
   if (resource === 'auto-payout') {
     if (!requireCronSecret(req, res)) return;
