@@ -50,6 +50,24 @@ test('confirm booking reuses an existing student by parent email', async () => {
   assert.equal(studentCreated, false, 'should not create a duplicate student record');
 });
 
+test('confirm booking normalizes email casing before matching/storing (SCRUM-13 follow-up)', async () => {
+  let queriedPath, postedEmail;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: {
+      dbGet: async (p) => { if (p.startsWith('/students')) queriedPath = p; return []; },
+      dbPost: async (p, body) => {
+        if (p === '/students') { postedEmail = body.parent_email; return { id: 'student1' }; }
+        return { id: 'b1' };
+      },
+    },
+  });
+  const res = makeRes();
+  await handler(confirmReq({ parentEmail: 'MixedCase@Example.COM' }), res);
+  assert.equal(res.statusCode, 200);
+  assert.match(queriedPath, /parent_email=eq\.mixedcase%40example\.com/i);
+  assert.equal(postedEmail, 'mixedcase@example.com');
+});
+
 test('confirm booking persists a new student\'s Stripe customer id when given', async () => {
   let posted;
   const handler = loadWithMocks('api/bookings.js', {

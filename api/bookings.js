@@ -11,6 +11,7 @@ const { requireCronSecret } = require('../lib/cronAuth');
 const { getMeetingLink } = require('../lib/tutors');
 const { createSchedulingLink, getScheduledEvent } = require('../lib/calendly');
 const { rateLimitOrReject } = require('../lib/rateLimit');
+const { normalizeEmail } = require('../lib/validate');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -213,12 +214,13 @@ module.exports = async (req, res) => {
           });
         }
       }
-      const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(parentEmail)}&limit=1`);
+      const normalizedParentEmail = normalizeEmail(parentEmail);
+      const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizedParentEmail)}&limit=1`);
       const student = existing.length
         ? existing[0]
         : await dbPost('/students', {
             parent_name: parentName || studentName,
-            parent_email: parentEmail,
+            parent_email: normalizedParentEmail,
             parent_phone: parentPhone || null,
             student_name: studentName,
             stripe_customer_id: customerId || null,

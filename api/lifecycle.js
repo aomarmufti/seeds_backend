@@ -5,7 +5,7 @@ const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { escapeHtml } = require('../lib/escapeHtml');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { getMeetingLink } = require('../lib/tutors');
@@ -49,11 +49,12 @@ async function verifyTutorIdentity(caller, tutorName) {
 // email rather than blocking booking with "contact your tutor", matching
 // what the public wizard already does for a brand-new family.
 async function findOrCreateOwnStudentRecord(caller, studentName) {
-  const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+  const email = normalizeEmail(caller.email);
+  const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&limit=1`);
   if (existing.length) return existing[0];
   return dbPost('/students', {
     parent_name: studentName || caller.email,
-    parent_email: caller.email,
+    parent_email: email,
     student_name: studentName || caller.email,
   });
 }
@@ -76,7 +77,7 @@ module.exports = async (req, res) => {
       if (forParty === 'tutor') {
         if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
         // Caller must be the parent on at least one real booking with this tutor.
-        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id`);
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id`);
         const studentIds = students.map(s => s.id);
         if (!studentIds.length) return res.status(403).json({ error: 'Forbidden' });
         const bookings = await dbGet(
@@ -532,7 +533,7 @@ module.exports = async (req, res) => {
       // Resolve from the caller's own email rather than trusting a
       // client-supplied studentEmail, which would let anyone look up
       // another parent's progress history just by knowing their email.
-      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+      const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&limit=1`);
       sid = students[0]?.id;
     }
     if (!sid) return res.status(400).json({ error: 'studentId required' });
@@ -726,7 +727,7 @@ module.exports = async (req, res) => {
         if (studentEmail.toLowerCase() !== caller.email.toLowerCase() && caller.role !== 'admin') {
           return res.status(403).json({ error: 'Forbidden' });
         }
-        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(studentEmail)}&limit=1`);
+        const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(studentEmail))}&limit=1`);
         if (!students.length) return res.status(200).json([]);
         sid = students[0].id;
       }
