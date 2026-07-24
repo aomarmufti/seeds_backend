@@ -148,7 +148,7 @@ test('resource=lessons rejects a caller who is neither the named tutor nor the s
     },
   });
   const res = makeRes();
-  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString() } }, res);
+  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString() } }, res);
   assert.equal(res.statusCode, 403);
 });
 
@@ -162,7 +162,7 @@ test('resource=lessons allows the named tutor even with no prior booking (first-
     } },
   });
   const res = makeRes();
-  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString() } }, res);
+  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString() } }, res);
   assert.equal(res.statusCode, 201);
 });
 
@@ -186,7 +186,7 @@ test('resource=lessons self-heals a missing students row for a student/parent bo
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString(), studentName: 'Jamie' },
+    body: { tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString(), studentName: 'Jamie' },
   }, res);
   assert.equal(res.statusCode, 201);
   assert.equal(posted.parent_email, 'parent@example.com');
@@ -201,7 +201,20 @@ test('resource=lessons requires studentId when the caller is the tutor themselve
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString() },
+    body: { tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+// Live bug: leaving Subject blank in the student/tutor portal's booking
+// modal sent subject: null straight through to a NOT-NULL column, crashing
+// with a raw Postgres error instead of a friendly validation message.
+test('resource=lessons requires subject', async () => {
+  const handler = loadWithMocks('api/lifecycle.js');
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 400);
 });

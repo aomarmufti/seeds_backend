@@ -149,6 +149,75 @@ test('POST billing customer-portal requires a customerId', async () => {
   assert.equal(res.statusCode, 400);
 });
 
+test('POST billing setup-intent creates a student, a Stripe customer, and persists it', async () => {
+  let posted, patched, customerCreated;
+  mockPaymentsModule({
+    createCustomer: async (params) => { customerCreated = params; return { id: 'cus_new' }; },
+    createSetupIntent: async () => ({ client_secret: 'seti_secret_1' }),
+  });
+  mockCors();
+  const authPath = require.resolve(path.join(backendRoot, 'lib/auth.js'));
+  require.cache[authPath] = {
+    id: authPath, filename: authPath, loaded: true,
+    exports: { requireAuth: async () => ({ id: 'parent-1', email: 'newparent@example.com', role: 'student' }) },
+  };
+  const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
+  require.cache[dbPath] = {
+    id: dbPath, filename: dbPath, loaded: true,
+    exports: {
+      dbGet: async () => [],
+      dbPost: async (p, body) => { posted = body; return { id: 'student-new', ...body }; },
+      dbPatch: async (p, body) => { patched = { p, body }; },
+    },
+  };
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'setup-intent' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.clientSecret, 'seti_secret_1');
+  assert.equal(res.body.customerId, 'cus_new');
+  assert.equal(posted.parent_email, 'newparent@example.com');
+  assert.equal(customerCreated.email, 'newparent@example.com');
+  assert.equal(patched.body.stripe_customer_id, 'cus_new');
+});
+
+test('POST billing setup-intent reuses an existing Stripe customer instead of creating a duplicate', async () => {
+  let customerCreateCalled = false;
+  mockPaymentsModule({
+    createCustomer: async () => { customerCreateCalled = true; return { id: 'cus_should_not_be_used' }; },
+    createSetupIntent: async (params) => { assert.equal(params.customerId, 'cus_existing'); return { client_secret: 'seti_secret_2' }; },
+  });
+  mockCors();
+  mockOwnerAuth(); // parent@example.com already owns cus_1 in this fixture's db mock — reuse the pattern's shape
+  const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
+  require.cache[dbPath] = {
+    id: dbPath, filename: dbPath, loaded: true,
+    exports: {
+      dbGet: async () => [{ id: 'student-1', parent_name: 'Parent', stripe_customer_id: 'cus_existing' }],
+    },
+  };
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'setup-intent' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.customerId, 'cus_existing');
+  assert.equal(customerCreateCalled, false);
+});
+
+test('POST billing setup-intent requires authentication', async () => {
+  mockPaymentsModule({});
+  mockCors();
+  const authPath = require.resolve(path.join(backendRoot, 'lib/auth.js'));
+  require.cache[authPath] = {
+    id: authPath, filename: authPath, loaded: true,
+    exports: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  };
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'setup-intent' }, headers: {} }, res);
+  assert.equal(res.statusCode, 401);
+});
+
 test('POST billing rejects an unknown resource', async () => {
   mockPaymentsModule({});
   mockCors();

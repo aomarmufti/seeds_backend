@@ -68,6 +68,120 @@ test('select-slot returns a friendly 409 when the overlap constraint fires', asy
   assert.match(res.body.error, /taken/);
 });
 
+// ── GET auth scoping (SCRUM-13) ───────────────────────────────────────────
+// Previously GET/PATCH had zero auth at all: anyone could dump every
+// prospective family's PII, or rewrite any lead's status/tutor assignment.
+
+test('GET leads requires authentication', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: {} }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('GET leads rejects a non-admin caller looking up someone else\'s email', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'me@example.com' }) },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { email: 'someone-else@example.com' } }, res);
+  assert.equal(res.statusCode, 403);
+});
+
+test('GET leads allows a non-admin caller looking up their own email', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'me@example.com' }) },
+    db: { dbGet: async (p) => p.includes('email=eq.me%40example.com') ? [{ id: 'lead1' }] : [] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { email: 'me@example.com' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.length, 1);
+});
+
+test('GET leads with no email scopes a tutor to their own assigned leads server-side', async () => {
+  let queriedPath;
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        queriedPath = p;
+        return [{ id: 'lead1' }];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(queriedPath, /assigned_tutor=eq\.Azeem/);
+});
+
+test('GET leads rejects a non-admin, non-tutor caller with no email filter', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'me@example.com' }) },
+    db: { dbGet: async () => [] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: {} }, res);
+  assert.equal(res.statusCode, 403);
+});
+
+// ── PATCH auth scoping (SCRUM-13) ─────────────────────────────────────────
+
+test('PATCH leads requires authentication', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'PATCH', body: { id: 'lead1', status: 'confirmed' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('PATCH leads rejects a tutor reassigning a lead to a different tutor', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+  });
+  const res = makeRes();
+  await handler({ method: 'PATCH', body: { id: 'lead1', assignedTutor: 'Someone Else' } }, res);
+  assert.equal(res.statusCode, 403);
+});
+
+test('PATCH leads rejects a tutor updating a lead not assigned to them', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (p.startsWith('/leads?id=eq.')) return [{ assigned_tutor: 'Someone Else' }];
+        return [];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'PATCH', body: { id: 'lead1', status: 'confirmed' } }, res);
+  assert.equal(res.statusCode, 403);
+});
+
+test('PATCH leads allows a tutor updating status/notes on their own assigned lead', async () => {
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (p.startsWith('/leads?id=eq.')) return [{ assigned_tutor: 'Azeem Omar-Mufti' }];
+        return [];
+      },
+      supabaseRequest: async () => ({ ok: true, json: async () => ([{ id: 'lead1', name: 'N', email: 'e@x.com' }]) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'PATCH', body: { id: 'lead1', status: 'confirmed' } }, res);
+  assert.equal(res.statusCode, 200);
+});
+
 function createLeadReq(overrides = {}) {
   return {
     method: 'POST',

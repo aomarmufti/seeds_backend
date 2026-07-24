@@ -98,7 +98,12 @@ module.exports = async (req, res) => {
   // data as well as the admin panel, so it stays open to any authenticated
   // request rather than admin-only (tightening this further needs the
   // caller's own student/tutor identity threaded through, tracked separately).
+  // The comment above documented that intent, but the requireAuth call
+  // implementing it was missing — every student/parent's name, email,
+  // phone, and Stripe customer id was reachable with zero authentication.
   if (req.query.resource === 'students') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
     try {
       const data = await dbGet(
         '/students?select=*,bookings(id,lesson_type,start_time,tutor_name,status)&order=created_at.desc'
@@ -139,7 +144,7 @@ module.exports = async (req, res) => {
       const studentIds = students.map(s => s.id);
       const bookings = await dbGet(
         `/bookings?student_id=in.(${studentIds.join(',')})` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,stripe_payment_intent_id,payment_link&order=start_time.desc`
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,meet_link,stripe_payment_intent_id,payment_link,student_id&order=start_time.desc`
       );
       return res.status(200).json({
         recentBookings: bookings.map(b => ({
@@ -150,10 +155,51 @@ module.exports = async (req, res) => {
           startTime: b.start_time,
           feePence: b.fee_pence,
           status: b.status,
+          meetLink: b.meet_link || null,
           paymentIntentId: b.stripe_payment_intent_id || null,
           paymentLink: b.payment_link || null,
           parentEmail: caller.email,
           stripeCustomerId: students.find(s => s.stripe_customer_id)?.stripe_customer_id || null,
+          studentId: b.student_id || null,
+        })),
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // A tutor's own bookings — self-service, scoped to the caller's own
+  // tutor_name rather than admin-only. Both the student and tutor portals'
+  // "My Calendar" views were previously calling the admin-only default
+  // resource below with zero auth, which always 401'd for a real caller —
+  // that's why booked lessons never actually appeared on either side.
+  if (req.query.resource === 'my-tutor-bookings') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    try {
+      const profiles = await dbGet(`/profiles?id=eq.${caller.id}&select=tutor_name&limit=1`);
+      const myTutorName = profiles[0]?.tutor_name;
+      if (!myTutorName) return res.status(200).json({ recentBookings: [] });
+      const bookings = await dbGet(
+        `/bookings?tutor_name=eq.${encodeURIComponent(myTutorName)}` +
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,meet_link,stripe_payment_intent_id,payment_link,student_id,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc`
+      );
+      return res.status(200).json({
+        recentBookings: bookings.map(b => ({
+          id: b.id,
+          studentName: b.students?.student_name || '—',
+          tutorName: b.tutor_name,
+          subject: b.subject,
+          lessonType: b.lesson_type,
+          startTime: b.start_time,
+          feePence: b.fee_pence,
+          status: b.status,
+          meetLink: b.meet_link || null,
+          paymentIntentId: b.stripe_payment_intent_id || null,
+          paymentLink: b.payment_link || null,
+          parentEmail: b.students?.parent_email || null,
+          stripeCustomerId: b.students?.stripe_customer_id || null,
+          studentId: b.student_id || null,
         })),
       });
     } catch (err) {

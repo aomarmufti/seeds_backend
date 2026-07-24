@@ -54,6 +54,30 @@ test('unknown analytics POST action returns 400', async () => {
   assert.equal(res.statusCode, 400);
 });
 
+// SCRUM-13: this endpoint's own comment documented "any authenticated
+// request" as the intended access model, but the requireAuth call
+// implementing it was missing — every student's name/email/phone/Stripe
+// customer id was reachable with zero authentication.
+test('resource=students requires authentication', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'students' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('resource=students returns data for any authenticated caller', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: { dbGet: async () => [{ id: 's1', student_name: 'S' }] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'students' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.length, 1);
+});
+
 test('resource=my-bookings returns only the caller\'s own bookings, scoped by their email', async () => {
   const handler = loadWithMocks('api/analytics.js', {
     auth: {
@@ -94,6 +118,53 @@ test('resource=my-bookings returns an empty list for a caller with no student re
   });
   const res = makeRes();
   await handler({ method: 'GET', query: { resource: 'my-bookings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.recentBookings, []);
+});
+
+// SCRUM-13/live-bug: the tutor portal's "My Calendar" previously called the
+// admin-only default resource with zero auth, which always 401'd for a
+// real tutor — booked lessons never appeared. This is the fix.
+test('resource=my-tutor-bookings returns only the caller\'s own bookings, scoped by their tutor_name', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async () => ({ id: 'tutor-1', role: 'tutor', email: 'tutor@example.com' }) },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        return [{
+          id: 'b1', subject: 'Maths', tutor_name: 'Azeem Omar-Mufti', lesson_type: 'gcse',
+          start_time: '2026-08-01T10:00:00Z', fee_pence: 4000, status: 'confirmed',
+          meet_link: 'https://meet.example.com/x', student_id: 's1',
+          students: { student_name: 'Jamie', parent_email: 'parent@example.com', stripe_customer_id: 'cus_1' },
+        }];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-tutor-bookings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.recentBookings.length, 1);
+  assert.equal(res.body.recentBookings[0].studentName, 'Jamie');
+  assert.equal(res.body.recentBookings[0].meetLink, 'https://meet.example.com/x');
+  assert.equal(res.body.recentBookings[0].studentId, 's1');
+});
+
+test('resource=my-tutor-bookings requires an authenticated caller', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-tutor-bookings' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('resource=my-tutor-bookings returns an empty list for a caller with no tutor_name', async () => {
+  const handler = loadWithMocks('api/analytics.js', {
+    auth: { requireAuth: async () => ({ id: 'student-1', role: 'student', email: 'student@example.com' }) },
+    db: { dbGet: async () => [] },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'my-tutor-bookings' } }, res);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.recentBookings, []);
 });

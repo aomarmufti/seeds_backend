@@ -50,6 +50,39 @@ test('confirm booking reuses an existing student by parent email', async () => {
   assert.equal(studentCreated, false, 'should not create a duplicate student record');
 });
 
+test('confirm booking persists a new student\'s Stripe customer id when given', async () => {
+  let posted;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: {
+      dbGet: async () => [],
+      dbPost: async (p, body) => {
+        if (p === '/students') { posted = body; return { id: 'student1', stripe_customer_id: body.stripe_customer_id }; }
+        return { id: 'b1' };
+      },
+    },
+  });
+  const res = makeRes();
+  await handler(confirmReq({ customerId: 'cus_123' }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(posted.stripe_customer_id, 'cus_123');
+});
+
+test('confirm booking backfills an existing student\'s missing Stripe customer id', async () => {
+  let patched;
+  const handler = loadWithMocks('api/bookings.js', {
+    db: {
+      dbGet: async (p) => (p.startsWith('/students') ? [{ id: 'existing-student', stripe_customer_id: null }] : []),
+      dbPost: async (p) => (p === '/bookings' ? { id: 'b1' } : { id: 'existing-student' }),
+      dbPatch: async (p, body) => { patched = { p, body }; },
+    },
+  });
+  const res = makeRes();
+  await handler(confirmReq({ customerId: 'cus_456' }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(patched.p, '/students?id=eq.existing-student');
+  assert.equal(patched.body.stripe_customer_id, 'cus_456');
+});
+
 test('confirm booking returns a friendly 409 on tutor double-booking', async () => {
   const handler = loadWithMocks('api/bookings.js', {
     db: {

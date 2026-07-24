@@ -11,7 +11,7 @@
 const { applyCors } = require('../lib/cors');
 const { getPaymentService } = require('../lib/payments');
 const { requireAuth } = require('../lib/auth');
-const { dbGet } = require('../lib/db');
+const { dbGet, dbPost, dbPatch } = require('../lib/db');
 
 // Confirms the authenticated caller owns this Stripe customer id (their own
 // students.stripe_customer_id), unless they're an admin. Returns true/false;
@@ -78,6 +78,36 @@ module.exports = async (req, res) => {
         await payments.detachPaymentMethod(paymentMethodId);
         return res.status(200).json({ success: true });
       } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+
+    // Lets a logged-in student/parent add a card independently of booking a
+    // lesson — previously the ONLY way to end up with a saved card was via
+    // the public wizard's paid-lesson flow, and even then the resulting
+    // Stripe customer id was never written back onto the student's row, so
+    // "saved cards" could never actually be listed for anyone afterwards.
+    // Idempotent: reuses the existing Stripe customer if this student
+    // already has one, rather than creating a duplicate on every click.
+    if (resource === 'setup-intent') {
+      try {
+        const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&limit=1`);
+        let student = existing[0];
+        if (!student) {
+          student = await dbPost('/students', {
+            parent_name: caller.email, parent_email: caller.email, student_name: caller.email,
+          });
+        }
+        let customerId = student.stripe_customer_id;
+        if (!customerId) {
+          const customer = await payments.createCustomer({ email: caller.email, name: student.parent_name || caller.email });
+          customerId = customer.id;
+          await dbPatch(`/students?id=eq.${student.id}`, { stripe_customer_id: customerId });
+        }
+        const setupIntent = await payments.createSetupIntent({ customerId, metadata: { parentEmail: caller.email } });
+        return res.status(200).json({ clientSecret: setupIntent.client_secret, customerId });
+      } catch (err) {
+        console.error('Setup intent error:', err.message);
         return res.status(500).json({ error: err.message });
       }
     }
