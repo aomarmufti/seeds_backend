@@ -4,7 +4,8 @@
   "description": "Seeds Tuition — Vercel serverless backend for payments, calendar, reminders",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "loadtest:booking-race": "node scripts/load-test-concurrent-booking.js"
   },
   "dependencies": {
     "nodemailer": "^9.0.3",
