@@ -144,7 +144,7 @@ module.exports = async (req, res) => {
       const studentIds = students.map(s => s.id);
       const bookings = await dbGet(
         `/bookings?student_id=in.(${studentIds.join(',')})` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,meet_link,stripe_payment_intent_id,payment_link,student_id&order=start_time.desc`
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,payment_status,meet_link,stripe_payment_intent_id,payment_link,student_id&order=start_time.desc`
       );
       return res.status(200).json({
         recentBookings: bookings.map(b => ({
@@ -155,6 +155,7 @@ module.exports = async (req, res) => {
           startTime: b.start_time,
           feePence: b.fee_pence,
           status: b.status,
+          paymentStatus: b.payment_status,
           meetLink: b.meet_link || null,
           paymentIntentId: b.stripe_payment_intent_id || null,
           paymentLink: b.payment_link || null,
@@ -182,7 +183,7 @@ module.exports = async (req, res) => {
       if (!myTutorName) return res.status(200).json({ recentBookings: [] });
       const bookings = await dbGet(
         `/bookings?tutor_name=eq.${encodeURIComponent(myTutorName)}` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,meet_link,stripe_payment_intent_id,payment_link,student_id,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc`
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,payment_status,meet_link,stripe_payment_intent_id,payment_link,student_id,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc`
       );
       return res.status(200).json({
         recentBookings: bookings.map(b => ({
@@ -194,6 +195,7 @@ module.exports = async (req, res) => {
           startTime: b.start_time,
           feePence: b.fee_pence,
           status: b.status,
+          paymentStatus: b.payment_status,
           meetLink: b.meet_link || null,
           paymentIntentId: b.stripe_payment_intent_id || null,
           paymentLink: b.payment_link || null,
@@ -220,11 +222,14 @@ module.exports = async (req, res) => {
     const now = new Date();
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    // "Paid" must mean actually paid — status confirmed/completed — not
-    // just "has a fee". Previously this counted every fee-bearing booking
-    // regardless of status, so revenue figures included lessons that were
-    // scheduled-but-unpaid, had a declined card, or were even cancelled.
-    const paid = bookings.filter(b => b.fee_pence > 0 && (b.status === 'confirmed' || b.status === 'completed'));
+    // "Paid" must mean the student has actually paid — payment_status='paid'
+    // — not just "has a fee" and not booking status. Under periodic billing
+    // a booking's own status is 'confirmed' the moment it's made regardless
+    // of whether it's been charged yet, so status alone can no longer tell
+    // us revenue was actually collected; payment_status is the only source
+    // of truth for that now (see the payment_status/status split explained
+    // in the 20260724163000 migration).
+    const paid = bookings.filter(b => b.fee_pence > 0 && b.payment_status === 'paid');
 
     const totalRevenue = paid.reduce((s, b) => s + b.fee_pence, 0);
     const thisMonth    = paid.filter(b => new Date(b.start_time) >= thisMonthStart)
@@ -252,15 +257,15 @@ module.exports = async (req, res) => {
     bookings.forEach(b => { if (b.status !== 'cancelled' && b.lesson_type in byType) byType[b.lesson_type]++; });
 
     // Per-tutor lesson counts exclude cancelled; revenue only counts what
-    // was actually paid (confirmed/completed), same as the headline
-    // totalRevenue above — a scheduled-but-unpaid or declined booking
-    // previously inflated both figures here.
+    // was actually paid (payment_status='paid'), same as the headline
+    // totalRevenue above — a lesson that's happened but not yet billed (or
+    // billed but declined) previously inflated both figures here.
     const tutorMap = {};
     bookings.forEach(b => {
       if (b.status === 'cancelled') return;
       if (!tutorMap[b.tutor_name]) tutorMap[b.tutor_name] = { lessons: 0, revenue: 0, unpaid: 0 };
       tutorMap[b.tutor_name].lessons++;
-      if (b.status === 'confirmed' || b.status === 'completed') {
+      if (b.payment_status === 'paid') {
         tutorMap[b.tutor_name].revenue += b.fee_pence;
       }
     });
@@ -272,8 +277,10 @@ module.exports = async (req, res) => {
         tutorMap[p.tutor_name].payoutId = p.id;
       }
     });
-    // For tutors with no payout request, show what they COULD request
-    bookings.filter(b => b.status === 'confirmed' && b.fee_pence > 0).forEach(b => {
+    // For tutors with no payout request, show what they COULD request — only
+    // for lessons the student has actually paid for (payment_status='paid');
+    // a confirmed-but-unbilled lesson isn't payable to the tutor yet.
+    bookings.filter(b => b.status === 'confirmed' && b.payment_status === 'paid' && b.fee_pence > 0).forEach(b => {
       if (tutorMap[b.tutor_name] && !tutorMap[b.tutor_name].payoutId) {
         tutorMap[b.tutor_name].unpaid += Math.round(b.fee_pence * TUTOR_CUT);
       }
@@ -300,6 +307,7 @@ module.exports = async (req, res) => {
         startTime: b.start_time,
         feePence: b.fee_pence,
         status: b.status,
+        paymentStatus: b.payment_status,
         meetLink: b.meet_link || null,
         paymentIntentId: b.stripe_payment_intent_id || null,
         paymentLink: b.payment_link || null,
@@ -309,7 +317,7 @@ module.exports = async (req, res) => {
       })),
       payouts: payouts.slice(0, 10),
       failedPayments: bookings
-        .filter(b => b.status === 'payment_failed')
+        .filter(b => b.payment_status === 'failed')
         .map(b => ({
           id: b.id,
           studentName: b.students?.student_name || '—',
@@ -325,8 +333,17 @@ module.exports = async (req, res) => {
         paymentFailed: bookings.filter(b => b.status === 'payment_failed').length,
         cancelled: bookings.filter(b => b.status === 'cancelled').length,
         completed: bookings.filter(b => b.status === 'completed').length,
-        totalCollected: paid.filter(b => ['confirmed', 'completed'].includes(b.status)).reduce((s, b) => s + b.fee_pence, 0),
-        totalOutstanding: bookings.filter(b => b.status === 'scheduled').reduce((s, b) => s + b.fee_pence, 0),
+        // Payment-status breakdown — the actual "who's paid, who hasn't"
+        // picture under periodic billing, independent of the lesson's own
+        // scheduled/confirmed/completed/cancelled lifecycle above.
+        unbilled: bookings.filter(b => b.payment_status === 'unbilled').length,
+        invoiced: bookings.filter(b => b.payment_status === 'invoiced').length,
+        paid: bookings.filter(b => b.payment_status === 'paid').length,
+        failed: bookings.filter(b => b.payment_status === 'failed').length,
+        totalCollected: paid.reduce((s, b) => s + b.fee_pence, 0),
+        totalOutstanding: bookings
+          .filter(b => b.status !== 'cancelled' && (b.payment_status === 'unbilled' || b.payment_status === 'invoiced'))
+          .reduce((s, b) => s + b.fee_pence, 0),
       },
     });
   } catch (err) {

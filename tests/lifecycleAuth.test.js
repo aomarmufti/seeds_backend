@@ -187,9 +187,16 @@ test('resource=lessons creates a trial booking as confirmed immediately (free, n
   }, res);
   assert.equal(res.statusCode, 201);
   assert.equal(posted.status, 'confirmed');
+  assert.equal(posted.payment_status, 'free', 'a free trial has nothing to bill, ever');
 });
 
-test('resource=lessons creates a paid booking as scheduled (awaiting payment), not confirmed', async () => {
+// Periodic billing replaced book-now-pay-now entirely: a lesson's own
+// status is 'confirmed' the moment it's booked regardless of lesson type —
+// payment is deferred to the family's own weekly/monthly billing cycle
+// (api/billing.js resource=billing-cron) rather than gating the booking
+// itself. payment_status is the only thing that tracks whether it's
+// actually been paid for.
+test('resource=lessons creates a paid booking as confirmed immediately, with payment_status=unbilled', async () => {
   let posted;
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => tutorCaller },
@@ -209,7 +216,8 @@ test('resource=lessons creates a paid booking as scheduled (awaiting payment), n
     body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'gcse', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 201);
-  assert.equal(posted.status, 'scheduled');
+  assert.equal(posted.status, 'confirmed');
+  assert.equal(posted.payment_status, 'unbilled');
 });
 
 test('resource=lessons self-heals a missing students row for a student/parent booking their own first lesson', async () => {
@@ -423,6 +431,81 @@ test('resource=charge-student marks the booking payment_failed on a declined sav
   assert.equal(res.body.status, 'failed');
   assert.equal(res.body.error, 'card_declined');
   assert.equal(patched.status, 'payment_failed');
+  assert.equal(patched.payment_status, 'failed');
+});
+
+test('resource=charge-student marks the booking payment_status=paid on a successful saved-card charge', async () => {
+  let patched;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?id=eq.')) {
+          return [{
+            id: 'booking-1', tutor_name: 'Azeem Omar-Mufti', subject: 'Maths',
+            start_time: new Date().toISOString(), lesson_type: 'gcse',
+            students: { student_name: 'Real Student', parent_email: 'real-parent@example.com' },
+          }];
+        }
+        return [];
+      },
+      supabaseRequest: async (path, opts) => {
+        if (path.startsWith('/bookings?id=eq.')) patched = JSON.parse(opts.body);
+        return { ok: true, json: async () => ({}) };
+      },
+    },
+  });
+  const stripeModulePath = require.resolve('stripe');
+  require.cache[stripeModulePath] = {
+    id: stripeModulePath, filename: stripeModulePath, loaded: true,
+    exports: () => ({
+      customers: { list: async () => ({ data: [{ id: 'cus_1' }] }) },
+      paymentMethods: { list: async () => ({ data: [{ id: 'pm_1' }] }) },
+      paymentIntents: { create: async () => ({ id: 'pi_1' }) },
+    }),
+  };
+  process.env.STRIPE_SECRET_KEY = 'sk_test_x';
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'charge-student' }, body: { bookingId: 'booking-1' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.status, 'charged');
+  assert.equal(patched.status, 'confirmed');
+  assert.equal(patched.payment_status, 'paid');
+});
+
+// ── auto-payout ───────────────────────────────────────────────────────────
+// Weekly cron that pays tutors 78% of what's owed for confirmed, fee-bearing
+// bookings. Under periodic billing a booking's own status is 'confirmed'
+// the moment it's made regardless of whether the family has been charged
+// yet, so this must also require payment_status='paid' or it would pay
+// tutors out of money never actually collected.
+test('resource=auto-payout only pays tutors for bookings the student has actually paid for', async () => {
+  process.env.CRON_SECRET = 'shh';
+  const queriedPaths = [];
+  const handler = loadWithMocks('api/lifecycle.js', {
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/tutor_accounts')) return [{ tutor_name: 'Azeem Omar-Mufti', onboarding_complete: true, stripe_account_id: 'acct_1' }];
+        if (p.startsWith('/bookings?')) { queriedPaths.push(p); return []; }
+        return [];
+      },
+    },
+  });
+  const stripeModulePath = require.resolve('stripe');
+  require.cache[stripeModulePath] = {
+    id: stripeModulePath, filename: stripeModulePath, loaded: true,
+    exports: () => ({ transfers: { create: async () => ({ id: 'tr_1' }) } }),
+  };
+  process.env.STRIPE_SECRET_KEY = 'sk_test_x';
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'auto-payout' }, headers: { authorization: 'Bearer shh' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(queriedPaths.length > 0);
+  queriedPaths.forEach(p => {
+    assert.ok(p.includes('status=eq.confirmed'));
+    assert.ok(p.includes('payment_status=eq.paid'), 'must not pay a tutor for an unbilled or declined lesson');
+  });
 });
 
 // ── progress-history ─────────────────────────────────────────────────────

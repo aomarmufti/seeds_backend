@@ -163,8 +163,13 @@ module.exports = async (req, res) => {
       });
       const stripe = getStripe();
       try {
+        // Only mark a booking "tutor paid out" if the student has actually
+        // paid for it (payment_status='paid') — under periodic billing a
+        // booking is confirmed the moment it's made regardless of billing
+        // status, so status=confirmed alone (the old check) would let an
+        // admin pay a tutor out for lessons never actually charged.
         await supabaseRequest(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&fee_pence=gt.0`,
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`,
           { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
         );
         let transferId = null, transferStatus = 'manual';

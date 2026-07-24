@@ -197,8 +197,14 @@ module.exports = async (req, res) => {
       const accounts = await dbGet('/tutor_accounts?onboarding_complete=eq.true');
       const results = [];
       for (const acct of accounts) {
+        // Only pay a tutor out for a lesson once the STUDENT has actually
+        // paid for it (payment_status='paid') — under periodic billing, a
+        // booking is confirmed the moment it's made regardless of whether
+        // it's been charged yet, so filtering on status=confirmed alone
+        // (the old check) would pay tutors out of money that was never
+        // actually collected from the family.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`
+          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`
         );
         if (!bookings.length) { results.push({ tutor: acct.tutor_name, status: 'nothing_due' }); continue; }
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
@@ -211,7 +217,7 @@ module.exports = async (req, res) => {
             description: `Seeds weekly payout — ${acct.tutor_name} — ${payoutWeek}`,
           }, { idempotencyKey: `auto-payout:${acct.tutor_name}:${payoutWeek}` });
           await supabaseRequest(
-            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&fee_pence=gt.0`,
+            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`,
             { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
           );
           await dbPost('/payouts', {
@@ -291,6 +297,7 @@ module.exports = async (req, res) => {
           created.push({ skipped: true, startTime: slotStart.toISOString(), reason: 'conflict' });
           continue;
         }
+        const fee = feeMap[lessonType] ?? 4000;
         const booking = await dbPost('/bookings', {
           student_id: studentId,
           tutor_name: b.tutorName,
@@ -298,15 +305,15 @@ module.exports = async (req, res) => {
           lesson_type: lessonType,
           start_time: slotStart.toISOString(),
           duration_mins: b.durationMins || 55,
-          fee_pence: feeMap[lessonType] ?? 4000,
-          // Trial lessons are free and confirmed immediately. Paid lessons
-          // start "scheduled" (awaiting payment) — the modal's own copy
-          // already promises this ("we'll charge your saved card / you'll
-          // get a payment link"), but the booking was previously created as
-          // confirmed unconditionally, before charge-student even ran, so a
-          // lesson was booked with zero payment enforcement regardless of
-          // whether the charge succeeded, failed, or was never attempted.
-          status: lessonType === 'trial' ? 'confirmed' : 'scheduled',
+          fee_pence: fee,
+          // Booking a lesson no longer gates on payment at all — payment
+          // is billed periodically per the family's own billing_cycle for
+          // lessons that have actually happened (see api/cron-billing.js),
+          // not charged (or a payment link emailed) the moment it's
+          // booked. status is purely the lesson's own lifecycle; whether
+          // it's been paid for is tracked separately via payment_status.
+          status: 'confirmed',
+          payment_status: fee === 0 ? 'free' : 'unbilled',
           meet_link: meetingLink,
         });
         created.push(booking);
@@ -404,7 +411,7 @@ module.exports = async (req, res) => {
           // caller beyond a raw Stripe error message.
           await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
             method: 'PATCH', prefer: 'return=minimal',
-            body: JSON.stringify({ status: 'payment_failed' }),
+            body: JSON.stringify({ status: 'payment_failed', payment_status: 'failed' }),
           });
           if (chargeErr.type === 'StripeCardError') {
             return res.status(402).json({
@@ -417,7 +424,7 @@ module.exports = async (req, res) => {
         // Update booking with payment intent
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ stripe_payment_intent_id: pi.id, status: 'confirmed' }),
+          body: JSON.stringify({ stripe_payment_intent_id: pi.id, status: 'confirmed', payment_status: 'paid' }),
         });
         return res.status(200).json({
           status: 'charged',
@@ -450,7 +457,7 @@ module.exports = async (req, res) => {
         // Mark booking as payment_pending
         await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ payment_link: session.url }),
+          body: JSON.stringify({ payment_link: session.url, payment_status: 'invoiced' }),
         });
 
         // Email the payment link to the student
@@ -510,7 +517,8 @@ module.exports = async (req, res) => {
       const b = bookings[0];
       return res.status(200).json({
         bookingId, status: b.status,
-        paid: !!b.stripe_payment_intent_id,
+        paymentStatus: b.payment_status,
+        paid: b.payment_status === 'paid' || b.payment_status === 'free',
         paymentLink: b.payment_link || null,
         feePence: b.fee_pence,
       });

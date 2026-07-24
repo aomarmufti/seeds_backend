@@ -81,25 +81,34 @@ async function handleStripeWebhook(req, res, rawBody) {
     case 'payment_intent.succeeded': {
       const pi = event.data.object;
       console.log(`✅ Payment succeeded: ${pi.id} — £${pi.amount / 100}`);
+      if (pi.metadata && pi.metadata.billingBatchId) {
+        await markBillingBatchPaid(pi.metadata.billingBatchId, pi.id);
+        break;
+      }
       if (pi.metadata && pi.metadata.bookingId) {
         await supabaseRequest(`/bookings?id=eq.${pi.metadata.bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ stripe_payment_intent_id: pi.id, status: 'confirmed' }),
+          body: JSON.stringify({ stripe_payment_intent_id: pi.id, status: 'confirmed', payment_status: 'paid' }),
         });
       }
       break;
     }
     case 'checkout.session.completed': {
-      // Student paid via Stripe Checkout (either the legacy payment-link
-      // flow or the Calendly-scheduled-then-pay flow — both set
-      // metadata.bookingId when creating the session).
+      // Student paid via Stripe Checkout (either an ad-hoc single-booking
+      // payment link — charge-student's no-saved-card fallback — or a
+      // periodic billing batch, distinguished by which metadata key is set).
       const session = event.data.object;
+      if (session.metadata && session.metadata.billingBatchId) {
+        await markBillingBatchPaid(session.metadata.billingBatchId, session.payment_intent);
+        break;
+      }
       if (session.metadata && session.metadata.bookingId) {
         await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({
             stripe_payment_intent_id: session.payment_intent,
             status: 'confirmed',
+            payment_status: 'paid',
             payment_link: null, // clear the link — it's been paid
           }),
         });
@@ -138,10 +147,20 @@ async function handleStripeWebhook(req, res, rawBody) {
     case 'checkout.session.expired': {
       // Student didn't complete payment within the session's time limit.
       const session = event.data.object;
+      if (session.metadata && session.metadata.billingBatchId) {
+        await supabaseRequest(`/billing_batches?id=eq.${session.metadata.billingBatchId}&status=eq.payment_link_sent`, {
+          method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'failed' }),
+        });
+        await supabaseRequest(`/bookings?billing_batch_id=eq.${session.metadata.billingBatchId}&payment_status=eq.invoiced`, {
+          method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ payment_status: 'failed' }),
+        });
+        console.warn(`⌛ Batch checkout session expired unpaid: batch ${session.metadata.billingBatchId}`);
+        break;
+      }
       if (session.metadata && session.metadata.bookingId) {
         await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}&status=eq.scheduled`, {
           method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ status: 'payment_failed' }),
+          body: JSON.stringify({ status: 'payment_failed', payment_status: 'failed' }),
         });
         console.warn(`⌛ Checkout session expired unpaid: booking ${session.metadata.bookingId}`);
       }
@@ -153,12 +172,21 @@ async function handleStripeWebhook(req, res, rawBody) {
       logError('webhook.stripe.payment_intent.payment_failed', new Error(`${pi.id}: ${failureMessage}`));
       await alertCritical(
         'Payment failed',
-        `PaymentIntent ${pi.id} failed for booking ${pi.metadata?.bookingId || '(none)'}: ${failureMessage}`
+        `PaymentIntent ${pi.id} failed for booking ${pi.metadata?.bookingId || '(none)'} batch ${pi.metadata?.billingBatchId || '(none)'}: ${failureMessage}`
       );
+      if (pi.metadata && pi.metadata.billingBatchId) {
+        await supabaseRequest(`/billing_batches?id=eq.${pi.metadata.billingBatchId}`, {
+          method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'failed' }),
+        });
+        await supabaseRequest(`/bookings?billing_batch_id=eq.${pi.metadata.billingBatchId}`, {
+          method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ payment_status: 'failed' }),
+        });
+        break;
+      }
       if (pi.metadata && pi.metadata.bookingId) {
         await supabaseRequest(`/bookings?id=eq.${pi.metadata.bookingId}`, {
           method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ status: 'payment_failed' }),
+          body: JSON.stringify({ status: 'payment_failed', payment_status: 'failed' }),
         });
       }
       break;
@@ -175,10 +203,32 @@ async function handleStripeWebhook(req, res, rawBody) {
   res.status(200).json({ received: true });
 }
 
+// Marks every booking in a periodic-billing batch as paid, and the batch
+// itself, once its Stripe payment_intent/checkout session completes.
+// Idempotent against Stripe's at-least-once webhook delivery: re-running
+// this on a redelivered event just re-sets the same rows to 'paid'.
+async function markBillingBatchPaid(billingBatchId, paymentIntentId) {
+  await supabaseRequest(`/billing_batches?id=eq.${billingBatchId}`, {
+    method: 'PATCH', prefer: 'return=minimal',
+    body: JSON.stringify({
+      status: 'paid', paid_at: new Date().toISOString(),
+      stripe_payment_intent_id: paymentIntentId, payment_link: null,
+    }),
+  });
+  await supabaseRequest(`/bookings?billing_batch_id=eq.${billingBatchId}`, {
+    method: 'PATCH', prefer: 'return=minimal',
+    body: JSON.stringify({ payment_status: 'paid' }),
+  });
+  console.log(`✅ Billing batch paid: ${billingBatchId}`);
+}
+
 // ── Calendly ─────────────────────────────────────────────────────────────
-// invitee.created creates the bookings row (status='scheduled') and, for
-// paid lesson types, a Stripe Checkout session + payment-link email. Free
-// trials skip straight to 'confirmed' since there's nothing to pay.
+// invitee.created creates the bookings row, confirmed immediately
+// regardless of lesson type — payment for paid lesson types is no longer
+// collected here. It's billed periodically per the family's own
+// billing_cycle (see api/billing.js resource=billing-cron), the same as
+// every other booking-creation path on the platform. Free trials are
+// simply marked payment_status='free' since there's nothing to bill.
 // invitee.canceled cancels the linked booking.
 //
 // Not verified against a live Calendly account/webhook in this
@@ -283,7 +333,7 @@ async function handleInviteeCreated(payload) {
     : await dbPost('/students', { parent_name: lead.name, parent_email: leadEmail, student_name: lead.name });
 
   const isFree = pricing.amount === 0;
-  const booking = await dbPost('/bookings', {
+  await dbPost('/bookings', {
     student_id: student.id,
     tutor_name: tutorName,
     subject: lead.subject,
@@ -291,7 +341,8 @@ async function handleInviteeCreated(payload) {
     start_time: parsed.startTime,
     duration_mins: durationMins,
     fee_pence: pricing.amount,
-    status: isFree ? 'confirmed' : 'scheduled',
+    status: 'confirmed',
+    payment_status: isFree ? 'free' : 'unbilled',
     meet_link: meetingLink,
     calendly_event_uri: parsed.eventUri,
     calendly_invitee_uri: parsed.inviteeUri,
@@ -302,38 +353,11 @@ async function handleInviteeCreated(payload) {
     body: JSON.stringify({ status: 'confirmed' }),
   });
 
-  if (isFree) {
-    const { sendBookingConfirmation } = require('../lib/reminders');
-    await sendBookingConfirmation({
-      studentName: lead.name, parentName: lead.name, parentEmail: lead.email,
-      tutorName, subject: lead.subject, lessonType, studentLevel: lead.level,
-      startTime: parsed.startTime, durationMins, meetingLink, amountPence: 0,
-    });
-    return;
-  }
-
-  const frontendUrl = process.env.FRONTEND_URL || 'https://seedsinstitute.co.uk';
-  const payments = getPaymentService();
-  const session = await payments.createCheckoutSession({
-    customerEmail: lead.email,
-    amount: pricing.amount,
-    description: `${pricing.label} — ${lead.name} — ${tutorName}`,
-    successUrl: `${frontendUrl}/?payment=success&booking=${booking.id}`,
-    cancelUrl: `${frontendUrl}/?payment=cancelled&booking=${booking.id}`,
-    metadata: { bookingId: booking.id },
-  });
-
-  await supabaseRequest(`/bookings?id=eq.${booking.id}`, {
-    method: 'PATCH', prefer: 'return=minimal',
-    body: JSON.stringify({ stripe_checkout_session_id: session.id, payment_link: session.url }),
-  });
-
-  const { sendPaymentLink } = require('../lib/reminders');
-  await sendPaymentLink({
-    parentName: lead.name, parentEmail: lead.email,
-    studentName: lead.name, tutorName, subject: lead.subject,
-    startTime: parsed.startTime, amountPence: pricing.amount,
-    checkoutUrl: session.url,
+  const { sendBookingConfirmation } = require('../lib/reminders');
+  await sendBookingConfirmation({
+    studentName: lead.name, parentName: lead.name, parentEmail: lead.email,
+    tutorName, subject: lead.subject, lessonType, studentLevel: lead.level,
+    startTime: parsed.startTime, durationMins, meetingLink, amountPence: pricing.amount,
   });
 }
 
