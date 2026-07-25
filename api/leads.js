@@ -93,6 +93,7 @@ module.exports = async (req, res) => {
           duration_mins: pricing.duration,
           fee_pence: 0,
           status: 'confirmed',
+          payment_status: 'free',
           meet_link: meetingLink,
         });
 
@@ -156,6 +157,7 @@ module.exports = async (req, res) => {
       // Email parent confirmation + alert admin (best-effort, non-blocking)
       try {
         const { sendEnquiryConfirmation, sendAdminEnquiryAlert } = require('../lib/reminders');
+        if (!process.env.ADMIN_EMAIL) console.error('ADMIN_EMAIL is not set — enquiry alert falling back to a hardcoded personal address');
         const adminEmail = process.env.ADMIN_EMAIL || 'azeemomar-mufti@outlook.com';
         await Promise.all([
           sendEnquiryConfirmation({ name, email, subject, level, goal }),

@@ -214,7 +214,7 @@ module.exports = async (req, res) => {
               <div style="background:#fff;padding:24px;border:1px solid #E8E8E8;border-top:none;border-radius:0 0 12px 12px">
                 <h3 style="color:#0D1B2A;font-family:Georgia,serif;margin-bottom:14px">${emailSubject}</h3>
                 <div style="color:#4A5568;font-size:15px;line-height:1.7">${emailBody.replace(/\n/g,'<br>')}</div>
-                <div style="margin-top:20px;padding-top:14px;border-top:1px solid #F0EDE8;font-size:12px;color:#A7A7A7">Seeds Tuition · seedstuition.co.uk</div>
+                <div style="margin-top:20px;padding-top:14px;border-top:1px solid #F0EDE8;font-size:12px;color:#A7A7A7">Seeds Tuition · seedsinstitute.co.uk</div>
               </div>
             </div>`,
           });

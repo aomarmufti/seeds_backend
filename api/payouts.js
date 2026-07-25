@@ -135,7 +135,7 @@ module.exports = async (req, res) => {
             });
           }
         }
-        const origin = body.returnOrigin || 'http://localhost:8080';
+        const origin = body.returnOrigin || process.env.FRONTEND_URL || 'https://seedsinstitute.co.uk';
         const link = await stripe.accountLinks.create({
           account: accountId,
           refresh_url: `${origin}/seeds-full-platform.html?connect=refresh`,

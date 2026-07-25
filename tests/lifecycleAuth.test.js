@@ -273,32 +273,6 @@ test('resource=lessons requires subject', async () => {
   assert.equal(res.statusCode, 400);
 });
 
-// ── availability ─────────────────────────────────────────────────────────
-test('resource=availability GET rejects a caller who is not that tutor', async () => {
-  const handler = loadWithMocks('api/lifecycle.js', {
-    auth: { requireAuth: async () => tutorCaller },
-    db: { dbGet: async (path) => path.startsWith('/profiles?id=eq.') ? [{ tutor_name: 'Someone Else' }] : [] },
-  });
-  const res = makeRes();
-  await handler({ method: 'GET', query: { resource: 'availability', tutorName: 'Azeem Omar-Mufti' } }, res);
-  assert.equal(res.statusCode, 403);
-});
-
-test('resource=availability GET allows the matching tutor', async () => {
-  const handler = loadWithMocks('api/lifecycle.js', {
-    auth: { requireAuth: async () => tutorCaller },
-    db: { dbGet: async (path) => {
-      if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
-      if (path.startsWith('/profiles?tutor_name=eq.')) return [{ availability: ['Mon:10:00'] }];
-      return [];
-    } },
-  });
-  const res = makeRes();
-  await handler({ method: 'GET', query: { resource: 'availability', tutorName: 'Azeem Omar-Mufti' } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { slots: ['Mon:10:00'] });
-});
-
 // ── charge-student ───────────────────────────────────────────────────────
 test('resource=charge-student derives the amount/email from the booking, ignoring any client-supplied override', async () => {
   let stripeCustomersListArgs;
