@@ -158,7 +158,14 @@ async function handleStripeWebhook(req, res, rawBody) {
         break;
       }
       if (session.metadata && session.metadata.bookingId) {
-        await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}&status=eq.scheduled`, {
+        // SCRUM-59: this used to filter on status=eq.scheduled, a status
+        // value nothing has set since bookings started going straight to
+        // 'confirmed' on creation — the ad-hoc single-booking Checkout Link
+        // this handles (api/lifecycle.js charge-student) sets
+        // payment_status: 'invoiced' instead, so guard on that (also
+        // avoids clobbering a booking that settled through another path
+        // in the meantime).
+        await supabaseRequest(`/bookings?id=eq.${session.metadata.bookingId}&payment_status=eq.invoiced`, {
           method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ status: 'payment_failed', payment_status: 'failed' }),
         });

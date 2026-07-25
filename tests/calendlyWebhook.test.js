@@ -46,7 +46,6 @@ function loadHandler({ dbGetMock, dbPostMock, dbMock, paymentsMock, remindersMoc
     id: remindersPath, filename: remindersPath, loaded: true,
     exports: {
       sendBookingConfirmation: async () => {},
-      sendPaymentLink: async () => {},
       ...remindersMock,
     },
   };

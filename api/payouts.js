@@ -40,13 +40,15 @@ module.exports = async (req, res) => {
     if (resource === 'verify' && tutor) {
       if (!(await verifyTutorIdentity(caller, tutor))) return res.status(403).json({ error: 'Forbidden' });
       try {
-        // Includes scheduled/payment_failed alongside confirmed/completed so
-        // a tutor can see a lesson's payment status read-only even before
-        // the student has paid — payout eligibility itself is still
-        // computed elsewhere (api/analytics.js) from confirmed/completed
-        // only, this is just visibility.
+        // Includes payment_failed alongside confirmed/completed so a tutor
+        // can see a lesson's payment status read-only even before the
+        // student has paid — payout eligibility itself is still computed
+        // elsewhere (api/analytics.js) from confirmed/completed only, this
+        // is just visibility. ('scheduled' dropped from this filter —
+        // SCRUM-59: no booking has had that status since creation started
+        // going straight to 'confirmed'.)
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(scheduled,payment_failed,confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,payment_status,stripe_payment_intent_id,students(student_name)&order=start_time.desc`
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutor)}&fee_pence=gt.0&status=in.(payment_failed,confirmed,completed)&select=id,subject,lesson_type,start_time,fee_pence,status,payment_status,stripe_payment_intent_id,students(student_name)&order=start_time.desc`
         );
         return res.status(200).json(bookings);
       } catch(e) { return res.status(500).json({ error: e.message }); }
