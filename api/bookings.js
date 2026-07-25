@@ -207,17 +207,22 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
 
       // This is the PUBLIC, unauthenticated homepage wizard's endpoint —
-      // it only ever offers a free trial lesson/consultation now. Paid
-      // lessons are booked (and billed automatically on the family's own
-      // billing cycle) through the authenticated portal instead, via
-      // api/lifecycle.js?resource=lessons. Rejecting anything else here
-      // closes the gap a direct API call could otherwise use to create a
-      // paid booking without ever going through the portal.
-      if (lessonType && lessonType !== 'trial') {
-        return res.status(400).json({ error: 'Only free trial lessons can be booked here — paid lessons are booked from your Student Portal.' });
+      // it only ever offers the free 15-min Initial Consultation now (the
+      // actual follow-up trial LESSON is booked separately from the
+      // portal, via api/lifecycle.js?resource=lessons — see SCRUM-58: they
+      // used to share the same 'trial' lesson_type, which also meant the
+      // one-trial-per-student DB constraint blocked a family from ever
+      // booking their real trial lesson once they'd had a consultation).
+      // Paid lessons are booked (and billed automatically on the family's
+      // own billing cycle) through the authenticated portal instead.
+      // Rejecting anything else here closes the gap a direct API call
+      // could otherwise use to create a paid booking without ever going
+      // through the portal.
+      if (lessonType && lessonType !== 'consultation') {
+        return res.status(400).json({ error: 'Only a free Initial Consultation can be booked here — paid lessons are booked from your Student Portal.' });
       }
 
-      const pricing = resolvePrice('trial', studentLevel);
+      const pricing = resolvePrice('consultation', studentLevel);
       const meetingLink = await getMeetingLink(tutorName);
 
       // Conflict check — prevent double-booking a tutor
@@ -258,7 +263,7 @@ module.exports = async (req, res) => {
       await dbPost('/bookings', {
         student_id: student.id,
         tutor_name: tutorName, subject,
-        lesson_type: 'trial',
+        lesson_type: 'consultation',
         start_time: startTime,
         duration_mins: pricing.duration,
         fee_pence: pricing.amount,
@@ -271,7 +276,7 @@ module.exports = async (req, res) => {
       await sendBookingConfirmation({
         studentName, parentName: parentName || studentName,
         parentEmail, parentPhone: parentPhone || null,
-        tutorName, subject, lessonType, studentLevel,
+        tutorName, subject, lessonType: 'consultation', studentLevel,
         startTime, durationMins: pricing.duration,
         meetingLink, amountPence: pricing.amount,
         paymentIntentId: paymentIntentId || null,
@@ -289,9 +294,9 @@ module.exports = async (req, res) => {
           conflict: true,
         });
       }
-      if (e.message.includes('bookings_one_trial_per_student')) {
+      if (e.message.includes('bookings_one_consultation_per_student')) {
         return res.status(409).json({
-          error: 'This student has already used their free trial lesson.',
+          error: 'This student has already booked their free Initial Consultation.',
           conflict: true,
         });
       }

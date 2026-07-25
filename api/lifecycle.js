@@ -583,7 +583,7 @@ module.exports = async (req, res) => {
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
       const b = bookings[0];
       const date = new Date(b.start_time).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
-      const typeLabel = {gcse:'GCSE 1:1 Lesson',alevel:'A-Level 1:1 Lesson',group:'Group Session',trial:'Free Trial Lesson'}[b.lesson_type]||b.lesson_type;
+      const typeLabel = {gcse:'GCSE 1:1 Lesson',alevel:'A-Level 1:1 Lesson',group:'Group Session',trial:'Free Trial Lesson',consultation:'Initial Consultation'}[b.lesson_type]||b.lesson_type;
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Seeds Receipt</title>
       <style>body{font-family:Arial,sans-serif;max-width:600px;margin:40px auto;color:#0D1B2A;padding:20px}
       .header{background:#0D1B2A;color:#fff;padding:24px;border-radius:12px;margin-bottom:24px}

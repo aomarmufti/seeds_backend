@@ -270,7 +270,7 @@ module.exports = async (req, res) => {
     });
 
     // Lesson type breakdown — excludes cancelled, which isn't a real lesson.
-    const byType = { gcse: 0, alevel: 0, group: 0, trial: 0 };
+    const byType = { gcse: 0, alevel: 0, group: 0, trial: 0, consultation: 0 };
     bookings.forEach(b => { if (b.status !== 'cancelled' && b.lesson_type in byType) byType[b.lesson_type]++; });
 
     // Per-tutor lesson counts exclude cancelled; revenue only counts what

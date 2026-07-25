@@ -7,7 +7,7 @@ function confirmReq(overrides = {}) {
     query: { action: 'confirm' },
     body: {
       studentName: 'S', parentName: 'P', parentEmail: 'p@example.com',
-      tutorName: 'Azeem', subject: 'Maths', lessonType: 'trial', studentLevel: 'gcse',
+      tutorName: 'Azeem', subject: 'Maths', lessonType: 'consultation', studentLevel: 'gcse',
       startTime: new Date().toISOString(), paymentIntentId: 'pi_test',
       ...overrides,
     },
@@ -118,12 +118,17 @@ test('confirm booking returns a friendly 409 on tutor double-booking', async () 
   assert.match(res.body.error, /Azeem/);
 });
 
-test('confirm booking returns a friendly 409 when the student already used their trial', async () => {
+// SCRUM-58: the public wizard's free consultation now has its own
+// lesson_type ('consultation'), separate from the portal-booked trial
+// lesson ('trial') — they used to share one type, which also meant the
+// old bookings_one_trial_per_student index blocked a family from ever
+// booking their real trial lesson once they'd already had a consultation.
+test('confirm booking returns a friendly 409 when the student already booked their consultation', async () => {
   const handler = loadWithMocks('api/bookings.js', {
     db: {
       dbGet: async () => [],
       dbPost: async (p) => {
-        if (p === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_trial_per_student"');
+        if (p === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_consultation_per_student"');
         return { id: 'student1' };
       },
     },
@@ -131,16 +136,17 @@ test('confirm booking returns a friendly 409 when the student already used their
   const res = makeRes();
   await handler(confirmReq(), res);
   assert.equal(res.statusCode, 409);
-  assert.match(res.body.error, /trial/);
+  assert.match(res.body.error, /Consultation/);
 });
 
 // This is the PUBLIC homepage wizard's endpoint — under periodic billing,
-// only a free trial/consultation can be booked here at all; paid lessons
-// go through the authenticated portal (api/lifecycle.js?resource=lessons)
-// instead. Without this guard, a direct API call (bypassing the frontend
-// entirely, which no longer offers non-trial options) could still create
-// a paid booking through the public, unauthenticated wizard flow.
-test('confirm booking rejects any lessonType other than trial', async () => {
+// only the free Initial Consultation can be booked here at all; paid
+// lessons go through the authenticated portal
+// (api/lifecycle.js?resource=lessons) instead. Without this guard, a
+// direct API call (bypassing the frontend entirely, which no longer
+// offers non-consultation options) could still create a paid booking
+// through the public, unauthenticated wizard flow.
+test('confirm booking rejects any lessonType other than consultation', async () => {
   const handler = loadWithMocks('api/bookings.js', {
     db: { dbGet: async () => [], dbPost: async (p) => (p === '/bookings' ? { id: 'b1' } : { id: 'student1' }) },
   });
@@ -149,7 +155,7 @@ test('confirm booking rejects any lessonType other than trial', async () => {
   assert.equal(res.statusCode, 400);
 });
 
-test('confirm booking creates the trial as payment_status=free', async () => {
+test('confirm booking creates the consultation as payment_status=free', async () => {
   let posted;
   const handler = loadWithMocks('api/bookings.js', {
     db: {
@@ -159,12 +165,12 @@ test('confirm booking creates the trial as payment_status=free', async () => {
         return { id: 'student1' };
       },
     },
-    pricing: { resolvePrice: () => ({ duration: 30, amount: 0 }) },
+    pricing: { resolvePrice: () => ({ duration: 15, amount: 0 }) },
   });
   const res = makeRes();
   await handler(confirmReq(), res);
   assert.equal(res.statusCode, 200);
-  assert.equal(posted.lesson_type, 'trial');
+  assert.equal(posted.lesson_type, 'consultation');
   assert.equal(posted.fee_pence, 0);
   assert.equal(posted.payment_status, 'free');
 });
