@@ -235,7 +235,10 @@ test('analytics refund-booking issues a refund for a paid booking', async () => 
   const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
   require.cache[dbPath] = {
     id: dbPath, filename: dbPath, loaded: true,
-    exports: { dbGet: async () => [{ id: 'b1', stripe_payment_intent_id: 'pi_1' }] },
+    exports: {
+      dbGet: async () => [{ id: 'b1', stripe_payment_intent_id: 'pi_1', fee_pence: 4000 }],
+      dbPatch: async () => ({}),
+    },
   };
   const handler = require(path.join(backendRoot, 'api/analytics.js'));
   const res = makeRes();
@@ -257,4 +260,123 @@ test('analytics refund-booking rejects a booking with no payment', async () => {
   const res = makeRes();
   await handler({ method: 'POST', body: { action: 'refund-booking', bookingId: 'b2' } }, res);
   assert.equal(res.statusCode, 400);
+});
+
+// SCRUM-56: cancel-booking/bulk-cancel previously only knew how to refund a
+// booking charged directly (the old book-now-pay-now model) — under
+// periodic billing, a paid booking's PaymentIntent lives on its
+// billing_batches row instead, so these regression-test the fallback.
+
+test('cancel-booking refunds a batch-billed paid booking via its billing_batches PaymentIntent and resets payment_status', async () => {
+  let refundedIntentId, refundedAmount;
+  mockPaymentsModule({
+    createRefund: async ({ paymentIntentId, amount }) => { refundedIntentId = paymentIntentId; refundedAmount = amount; return { id: 're_batch' }; },
+  });
+  mockCors();
+  mockAdminAuth();
+  const patches = [];
+  const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
+  require.cache[dbPath] = {
+    id: dbPath, filename: dbPath, loaded: true,
+    exports: {
+      dbGet: async (p) => {
+        if (p.startsWith('/bookings?id=eq.')) return [{ id: '11111111-1111-1111-1111-111111111111', payment_status: 'paid', stripe_payment_intent_id: null, billing_batch_id: 'batch-1', fee_pence: 4000 }];
+        if (p.startsWith('/billing_batches?id=eq.')) return [{ id: 'batch-1', stripe_payment_intent_id: 'pi_batch' }];
+        return [];
+      },
+      dbPatch: async (p, body) => { patches.push({ path: p, body }); return {}; },
+    },
+  };
+  const handler = require(path.join(backendRoot, 'api/analytics.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'cancel-booking', bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.refunded, true);
+  assert.equal(refundedIntentId, 'pi_batch');
+  assert.equal(refundedAmount, 4000);
+  assert.equal(patches[0].body.status, 'cancelled');
+  assert.equal(patches[0].body.payment_status, 'refunded');
+});
+
+test('cancel-booking cancels without a refund attempt for an already-unbilled booking', async () => {
+  mockPaymentsModule({ createRefund: async () => { throw new Error('should not be called'); } });
+  mockCors();
+  mockAdminAuth();
+  const patches = [];
+  const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
+  require.cache[dbPath] = {
+    id: dbPath, filename: dbPath, loaded: true,
+    exports: {
+      dbGet: async () => [{ id: 'b1', payment_status: 'unbilled', billing_batch_id: null, fee_pence: 4000 }],
+      dbPatch: async (p, body) => { patches.push({ path: p, body }); return {}; },
+    },
+  };
+  const handler = require(path.join(backendRoot, 'api/analytics.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'cancel-booking', bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.refunded, false);
+  assert.equal(patches[0].body.payment_status, undefined);
+});
+
+test('bulk-cancel refunds batch-billed paid bookings via billing_batches and alerts on partial failure', async () => {
+  mockPaymentsModule({
+    createRefund: async ({ paymentIntentId }) => {
+      if (paymentIntentId === 'pi_fails') throw new Error('card_declined');
+      return { id: 're_' + paymentIntentId };
+    },
+  });
+  mockCors();
+  mockAdminAuth();
+  const patches = [];
+  const alerts = [];
+  const dbPath = require.resolve(path.join(backendRoot, 'lib/db.js'));
+  require.cache[dbPath] = {
+    id: dbPath, filename: dbPath, loaded: true,
+    exports: {
+      dbGet: async (p) => {
+        if (p.startsWith('/bookings?status=eq.confirmed')) {
+          return [
+            { id: 'b1', payment_status: 'paid', stripe_payment_intent_id: null, billing_batch_id: 'batch-ok', fee_pence: 4000 },
+            { id: 'b2', payment_status: 'paid', stripe_payment_intent_id: null, billing_batch_id: 'batch-fail', fee_pence: 4000 },
+            { id: 'b3', payment_status: 'unbilled', billing_batch_id: null, fee_pence: 4000 },
+          ];
+        }
+        if (p.startsWith('/billing_batches?id=eq.batch-ok')) return [{ id: 'batch-ok', stripe_payment_intent_id: 'pi_ok' }];
+        if (p.startsWith('/billing_batches?id=eq.batch-fail')) return [{ id: 'batch-fail', stripe_payment_intent_id: 'pi_fails' }];
+        return [];
+      },
+      supabaseRequest: async (p, opts) => {
+        if (opts?.method === 'PATCH' && p.startsWith('/bookings?id=eq.')) {
+          patches.push({ path: p, body: JSON.parse(opts.body) });
+        }
+        return { ok: true, json: async () => ({}) };
+      },
+    },
+  };
+  const loggerPath = require.resolve(path.join(backendRoot, 'lib/logger.js'));
+  require.cache[loggerPath] = {
+    id: loggerPath, filename: loggerPath, loaded: true,
+    exports: { alertCritical: async (subject, details) => { alerts.push({ subject, details }); }, logError: () => {} },
+  };
+  const handler = require(path.join(backendRoot, 'api/lifecycle.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'bulk-cancel' }, body: { date: '2026-08-01' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.cancelled, 3);
+  assert.equal(res.body.refunded, 1);
+  assert.equal(res.body.refundFailed, 1);
+  assert.equal(alerts.length, 1);
+
+  const b1Patch = patches.find(p => p.path.includes('b1')).body;
+  assert.equal(b1Patch.status, 'cancelled');
+  assert.equal(b1Patch.payment_status, 'refunded');
+
+  const b2Patch = patches.find(p => p.path.includes('b2')).body;
+  assert.equal(b2Patch.status, 'cancelled');
+  assert.equal(b2Patch.payment_status, undefined, 'failed refund must not be marked refunded');
+
+  const b3Patch = patches.find(p => p.path.includes('b3')).body;
+  assert.equal(b3Patch.status, 'cancelled');
+  assert.equal(b3Patch.payment_status, undefined);
 });
