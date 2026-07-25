@@ -21,7 +21,7 @@ function mockPackage(pkgName, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly, nodemailer } = {}) {
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly, nodemailer, payments } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   mockPackage('nodemailer', {
@@ -76,6 +76,15 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     parseInviteeCreatedPayload: () => ({}),
     getScheduledEvent: async () => ({ startTime: new Date().toISOString(), endTime: new Date().toISOString() }),
     ...calendly,
+  });
+  // Default: a refund/charge that just succeeds, so tests exercising a
+  // paid-booking code path don't need real Stripe config. Pass
+  // payments:{createRefund:...} (etc.) to assert on the actual call.
+  mockModule('lib/payments/index.js', {
+    getPaymentService: () => ({
+      createRefund: async () => ({ id: 're_test' }),
+      ...payments,
+    }),
   });
 
   return require(path.join(backendRoot, apiRelPath));

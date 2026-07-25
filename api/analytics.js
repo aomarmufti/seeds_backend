@@ -270,7 +270,7 @@ module.exports = async (req, res) => {
     });
 
     // Lesson type breakdown — excludes cancelled, which isn't a real lesson.
-    const byType = { gcse: 0, alevel: 0, group: 0, trial: 0 };
+    const byType = { gcse: 0, alevel: 0, group: 0, trial: 0, consultation: 0 };
     bookings.forEach(b => { if (b.status !== 'cancelled' && b.lesson_type in byType) byType[b.lesson_type]++; });
 
     // Per-tutor lesson counts exclude cancelled; revenue only counts what
@@ -346,7 +346,13 @@ module.exports = async (req, res) => {
         })),
       reconciliation: {
         confirmed: bookings.filter(b => b.status === 'confirmed').length,
-        scheduled: bookings.filter(b => b.status === 'scheduled').length,
+        // SCRUM-59: previously counted status === 'scheduled', a status
+        // value nothing has set since bookings started going straight to
+        // 'confirmed' on creation — always reported 0 ("Awaiting payment"
+        // permanently showed 0 on the admin dashboard). payment_status
+        // 'invoiced' (a bill/payment link sent, not yet settled) is the
+        // real "awaiting payment" signal under periodic billing.
+        scheduled: bookings.filter(b => b.payment_status === 'invoiced').length,
         paymentFailed: bookings.filter(b => b.status === 'payment_failed').length,
         cancelled: bookings.filter(b => b.status === 'cancelled').length,
         completed: bookings.filter(b => b.status === 'completed').length,

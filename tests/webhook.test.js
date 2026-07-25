@@ -189,7 +189,7 @@ test('checkout.session.completed does not crash if the confirmation email fails'
   assert.equal(res.body.received, true);
 });
 
-test('checkout.session.expired marks an unpaid scheduled booking as payment_failed', async () => {
+test('checkout.session.expired marks an unpaid invoiced booking as payment_failed', async () => {
   const patches = [];
   const handler = loadWebhookHandler({
     event: {
@@ -205,7 +205,7 @@ test('checkout.session.expired marks an unpaid scheduled booking as payment_fail
   const res = makeRes();
   await handler(makeReq(), res);
   assert.equal(res.statusCode, 200);
-  assert.equal(patches[0].path, '/bookings?id=eq.b3&status=eq.scheduled');
+  assert.equal(patches[0].path, '/bookings?id=eq.b3&payment_status=eq.invoiced');
   assert.equal(patches[0].body.status, 'payment_failed');
 });
 

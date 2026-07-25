@@ -9,6 +9,7 @@ const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { getMeetingLink } = require('../lib/tutors');
+const { refundBooking } = require('../lib/refunds');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -583,7 +584,7 @@ module.exports = async (req, res) => {
       if (!bookings.length) return res.status(404).json({ error: 'Booking not found' });
       const b = bookings[0];
       const date = new Date(b.start_time).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
-      const typeLabel = {gcse:'GCSE 1:1 Lesson',alevel:'A-Level 1:1 Lesson',group:'Group Session',trial:'Free Trial Lesson'}[b.lesson_type]||b.lesson_type;
+      const typeLabel = {gcse:'GCSE 1:1 Lesson',alevel:'A-Level 1:1 Lesson',group:'Group Session',trial:'Free Trial Lesson',consultation:'Initial Consultation'}[b.lesson_type]||b.lesson_type;
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Seeds Receipt</title>
       <style>body{font-family:Arial,sans-serif;max-width:600px;margin:40px auto;color:#0D1B2A;padding:20px}
       .header{background:#0D1B2A;color:#fff;padding:24px;border-radius:12px;margin-bottom:24px}
@@ -687,7 +688,6 @@ module.exports = async (req, res) => {
       const bookings = await dbGet(path + '&select=id,stripe_payment_intent_id,billing_batch_id,payment_status,fee_pence');
 
       let cancelled = 0, refunded = 0, refundFailed = 0;
-      const { refundBooking } = require('../lib/refunds');
 
       for (const b of bookings) {
         const patch = { status: 'cancelled' };
@@ -709,6 +709,87 @@ module.exports = async (req, res) => {
       }
       return res.status(200).json({ success: true, cancelled, refunded, refundFailed });
     } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── SELF-CANCEL / SELF-RESCHEDULE (tutor manages their own lesson) ───────
+  // SCRUM-57: the only cancellation path used to be admin-only
+  // (api/analytics.js action=cancel-booking) — a tutor had no way to
+  // cancel or reschedule their own lesson without going through an admin.
+  // A frontend modal for this (tpOpenSelfManage) already existed but was
+  // unreachable: it called the admin-only endpoint directly, which would
+  // 403 for a non-admin tutor even if wired up.
+  if (resource === 'self-cancel-booking') {
+    if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { bookingId } = req.body || {};
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
+    try {
+      const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+      const booking = bookings[0];
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (!(await verifyTutorIdentity(caller, booking.tutor_name))) return res.status(403).json({ error: 'Forbidden' });
+      if (booking.status === 'cancelled') return res.status(409).json({ error: 'This lesson is already cancelled.' });
+      if (new Date(booking.start_time) <= new Date()) {
+        return res.status(409).json({ error: 'This lesson has already happened and can\'t be cancelled.' });
+      }
+
+      let refundResult = { refunded: false };
+      let refundError = null;
+      try {
+        refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
+      } catch(refundErr) {
+        console.warn('Self-cancel refund failed:', refundErr.message);
+        refundError = refundErr.message;
+      }
+      const patch = { status: 'cancelled' };
+      if (refundResult.refunded) patch.payment_status = 'refunded';
+      await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+        method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch),
+      });
+      await logAdminAction({ actor: caller.email, action: 'self-cancel-booking', targetType: 'booking', targetId: bookingId });
+      return res.status(200).json({ success: true, refunded: refundResult.refunded, refundError });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  if (resource === 'self-reschedule-booking') {
+    if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { bookingId, newStartTime } = req.body || {};
+    if (!bookingId || !newStartTime) return res.status(400).json({ error: 'bookingId and newStartTime required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
+    try {
+      const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+      const booking = bookings[0];
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (!(await verifyTutorIdentity(caller, booking.tutor_name))) return res.status(403).json({ error: 'Forbidden' });
+      if (booking.status === 'cancelled') return res.status(409).json({ error: 'This lesson is already cancelled.' });
+      if (new Date(booking.start_time) <= new Date()) {
+        return res.status(409).json({ error: 'This lesson has already happened and can\'t be rescheduled.' });
+      }
+      // Shift end_time by the same delta so duration_mins stays accurate —
+      // the admin equivalent (analytics.js reschedule-booking) doesn't do
+      // this, but there's no reason a lesson's length should silently
+      // change just because it moved.
+      const newStart = new Date(newStartTime);
+      const newEnd = booking.end_time
+        ? new Date(newStart.getTime() + (new Date(booking.end_time) - new Date(booking.start_time)))
+        : null;
+      const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+        method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ start_time: newStart.toISOString(), ...(newEnd ? { end_time: newEnd.toISOString() } : {}) }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      await logAdminAction({ actor: caller.email, action: 'self-reschedule-booking', targetType: 'booking', targetId: bookingId });
+      return res.status(200).json({ success: true });
+    } catch(e) {
+      if (e.message.includes('bookings_no_tutor_overlap')) {
+        return res.status(409).json({ error: 'You\'re already booked at that time. Please choose a different slot.', conflict: true });
+      }
+      return res.status(500).json({ error: e.message });
+    }
   }
 
   // In-platform messaging was removed entirely (SCRUM-49/SCRUM-55) —
