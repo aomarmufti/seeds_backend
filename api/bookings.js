@@ -27,40 +27,30 @@ module.exports = async (req, res) => {
   // but `tutors` is keyed by name alone and always exists, so this works even
   // for tutors who don't have (or don't need) a portal account yet.
   if (action === 'calendly-link') {
-    const { tutorName, lessonType, context } = req.query;
+    const { tutorName } = req.query;
     if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
-    // Three distinct Calendly event types can be in play here, not two:
-    //   1. The public homepage's free "Initial Consultation" (15 min,
-    //      context=consultation, only ever sent by the unauthenticated
-    //      wizard) — calendly_trial_event_type_uri.
-    //   2. The actual free trial LESSON (lessonType=trial, no context —
-    //      booked from the authenticated student/tutor portal after the
-    //      consultation) — calendly_trial_lesson_event_type_uri. Falls back
-    //      to the regular lesson link, not the 15-min consultation link,
-    //      since a real lesson's length has far more in common with a
-    //      regular lesson than a short intro call.
-    //   3. A regular paid lesson (gcse/alevel/group) — calendly_event_type_uri.
-    const isConsultation = context === 'consultation';
-    const isTrialLesson = !isConsultation && lessonType === 'trial';
-    const primaryCol = isConsultation ? 'calendly_trial_event_type_uri'
-      : isTrialLesson ? 'calendly_trial_lesson_event_type_uri'
-      : 'calendly_event_type_uri';
-    const fallbackCol = isConsultation || isTrialLesson ? 'calendly_event_type_uri' : 'calendly_trial_event_type_uri';
+    // SCRUM-67: the connected Calendly account is on the free "Basic" plan,
+    // which only allows ONE active event type across the whole account —
+    // having separate consultation/trial-lesson/regular-lesson event types
+    // (the previous design) meant activating any one silently deactivated
+    // the others. Consolidated to a single shared `calendly_event_type_uri`
+    // for every booking context; lessonType/context no longer affect which
+    // Calendly link is used. Each context's actual duration/price still
+    // comes from resolvePrice() and is stored on the booking row
+    // independently of whatever slot length Calendly's own calendar shows —
+    // deliberately the longer "Lesson" event type, so a short consultation
+    // over-blocks the tutor's real calendar rather than under-blocking it.
     try {
       let eventTypeUri;
       if (tutorName === 'Best available match') {
         // No specific tutor chosen yet — any tutor with real-time scheduling
         // configured will do, matching how getMeetingLink/the conflict-check
         // already treat this value as "not a real tutor name".
-        const rows = await dbGet(`/tutors?${primaryCol}=not.is.null&select=${primaryCol}&limit=1`);
-        eventTypeUri = rows[0]?.[primaryCol];
-        if (!eventTypeUri) {
-          const fallbackRows = await dbGet(`/tutors?${fallbackCol}=not.is.null&select=${fallbackCol}&limit=1`);
-          eventTypeUri = fallbackRows[0]?.[fallbackCol];
-        }
+        const rows = await dbGet(`/tutors?calendly_event_type_uri=not.is.null&select=calendly_event_type_uri&limit=1`);
+        eventTypeUri = rows[0]?.calendly_event_type_uri;
       } else {
-        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=${primaryCol},${fallbackCol}&limit=1`);
-        eventTypeUri = rows[0]?.[primaryCol] || rows[0]?.[fallbackCol];
+        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=calendly_event_type_uri&limit=1`);
+        eventTypeUri = rows[0]?.calendly_event_type_uri;
       }
       if (!eventTypeUri) {
         return res.status(404).json({ error: 'This tutor doesn\'t have real-time scheduling set up yet.' });

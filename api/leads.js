@@ -226,10 +226,11 @@ module.exports = async (req, res) => {
           // link straight away instead of waiting for the tutor to
           // manually propose slots. Tutors without Calendly set up yet
           // keep using the manual propose-slots flow below unaffected.
-          // A new lead being assigned a tutor is precisely the "initial
-          // consultation" case, so prefer that event type over the regular
-          // paid-lesson one if both are configured.
-          const leadEventTypeUri = tutorProfile?.calendly_trial_event_type_uri || tutorProfile?.calendly_event_type_uri;
+          // SCRUM-67: the connected Calendly account's free plan only
+          // allows one active event type across the whole account, so
+          // every context (including this initial-consultation send)
+          // shares the same calendly_event_type_uri now.
+          const leadEventTypeUri = tutorProfile?.calendly_event_type_uri;
           if (leadEventTypeUri) {
             try {
               const { createSchedulingLink } = require('../lib/calendly');
