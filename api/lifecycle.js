@@ -196,15 +196,19 @@ module.exports = async (req, res) => {
     try {
       const accounts = await dbGet('/tutor_accounts?onboarding_complete=eq.true');
       const results = [];
+      const nowIso = new Date().toISOString();
       for (const acct of accounts) {
-        // Only pay a tutor out for a lesson once the STUDENT has actually
-        // paid for it (payment_status='paid') — under periodic billing, a
-        // booking is confirmed the moment it's made regardless of whether
-        // it's been charged yet, so filtering on status=confirmed alone
-        // (the old check) would pay tutors out of money that was never
-        // actually collected from the family.
+        // Only pay a tutor out for a lesson once (a) the STUDENT has
+        // actually paid for it (payment_status='paid') — under periodic
+        // billing, a booking is confirmed the moment it's made regardless
+        // of whether it's been charged yet — AND (b) the lesson has
+        // actually happened (end_time in the past). A family paying their
+        // billing cycle in advance of a lesson that hasn't run yet must
+        // never translate into paying the tutor out for it early; "you get
+        // paid for what you complete" applies to both sides of this
+        // marketplace, not just the family's side.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`
+          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${nowIso}`
         );
         if (!bookings.length) { results.push({ tutor: acct.tutor_name, status: 'nothing_due' }); continue; }
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
@@ -217,7 +221,7 @@ module.exports = async (req, res) => {
             description: `Seeds weekly payout — ${acct.tutor_name} — ${payoutWeek}`,
           }, { idempotencyKey: `auto-payout:${acct.tutor_name}:${payoutWeek}` });
           await supabaseRequest(
-            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`,
+            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${nowIso}`,
             { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
           );
           await dbPost('/payouts', {

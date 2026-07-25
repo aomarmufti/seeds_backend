@@ -505,6 +505,7 @@ test('resource=auto-payout only pays tutors for bookings the student has actuall
   queriedPaths.forEach(p => {
     assert.ok(p.includes('status=eq.confirmed'));
     assert.ok(p.includes('payment_status=eq.paid'), 'must not pay a tutor for an unbilled or declined lesson');
+    assert.ok(p.includes('end_time=lte.'), 'must not pay a tutor for a lesson that hasn\'t happened yet');
   });
 });
 

@@ -27,15 +27,25 @@ module.exports = async (req, res) => {
   // but `tutors` is keyed by name alone and always exists, so this works even
   // for tutors who don't have (or don't need) a portal account yet.
   if (action === 'calendly-link') {
-    const { tutorName, lessonType } = req.query;
+    const { tutorName, lessonType, context } = req.query;
     if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
-    // A trial/first-consultation booking and a regular paid lesson are
-    // typically different Calendly event types (e.g. a free 15-min intro
-    // call vs. a 30-min paid lesson) — pick the column that matches, falling
-    // back to the other one if only one has been configured so far.
-    const isTrial = lessonType === 'trial';
-    const primaryCol = isTrial ? 'calendly_trial_event_type_uri' : 'calendly_event_type_uri';
-    const fallbackCol = isTrial ? 'calendly_event_type_uri' : 'calendly_trial_event_type_uri';
+    // Three distinct Calendly event types can be in play here, not two:
+    //   1. The public homepage's free "Initial Consultation" (15 min,
+    //      context=consultation, only ever sent by the unauthenticated
+    //      wizard) — calendly_trial_event_type_uri.
+    //   2. The actual free trial LESSON (lessonType=trial, no context —
+    //      booked from the authenticated student/tutor portal after the
+    //      consultation) — calendly_trial_lesson_event_type_uri. Falls back
+    //      to the regular lesson link, not the 15-min consultation link,
+    //      since a real lesson's length has far more in common with a
+    //      regular lesson than a short intro call.
+    //   3. A regular paid lesson (gcse/alevel/group) — calendly_event_type_uri.
+    const isConsultation = context === 'consultation';
+    const isTrialLesson = !isConsultation && lessonType === 'trial';
+    const primaryCol = isConsultation ? 'calendly_trial_event_type_uri'
+      : isTrialLesson ? 'calendly_trial_lesson_event_type_uri'
+      : 'calendly_event_type_uri';
+    const fallbackCol = isConsultation || isTrialLesson ? 'calendly_event_type_uri' : 'calendly_trial_event_type_uri';
     try {
       let eventTypeUri;
       if (tutorName === 'Best available match') {
