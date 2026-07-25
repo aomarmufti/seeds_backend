@@ -307,15 +307,18 @@ async function handleInviteeCreated(payload) {
     return;
   }
 
-  // A booked event type can be either the regular-lesson link or the
-  // initial-consultation link (SCRUM-55 follow-up) — check both columns
-  // rather than assuming it's always the same one.
+  // A booked event type can be the regular-lesson link, the initial-
+  // consultation link, or the trial-lesson link (SCRUM-55 follow-up /
+  // bookings.js's three-column calendly-link resolver) — check all three,
+  // and read from the canonical `tutors` table like the forward link
+  // generator does (a tutor may not have a `profiles` row yet).
   const encodedEventTypeUri = encodeURIComponent(parsed.eventTypeUri);
-  const [byLessonUri, byTrialUri] = await Promise.all([
-    dbGet(`/profiles?calendly_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
-    dbGet(`/profiles?calendly_trial_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
+  const [byLessonUri, byTrialUri, byTrialLessonUri] = await Promise.all([
+    dbGet(`/tutors?calendly_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
+    dbGet(`/tutors?calendly_trial_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
+    dbGet(`/tutors?calendly_trial_lesson_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
   ]);
-  const tutorName = byLessonUri[0]?.tutor_name || byTrialUri[0]?.tutor_name || lead.assigned_tutor;
+  const tutorName = byLessonUri[0]?.name || byTrialUri[0]?.name || byTrialLessonUri[0]?.name || lead.assigned_tutor;
   if (!tutorName) {
     console.warn(`Calendly invitee.created: no tutor resolved for event type ${parsed.eventTypeUri}`);
     return;

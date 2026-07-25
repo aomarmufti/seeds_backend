@@ -438,7 +438,7 @@ module.exports = async (req, res) => {
         });
       } else {
         // ── No saved card — create a Stripe Payment Link ─────────────────
-        const origin = req.body.portalUrl || 'https://seeds-backend-six.vercel.app';
+        const origin = req.body.portalUrl || process.env.FRONTEND_URL || 'https://seedsinstitute.co.uk';
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
           payment_method_types: ['card'],
@@ -529,38 +529,6 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── AVAILABILITY (tutor saves their available slots) ─────────────────────
-  // Previously anyone who knew a tutor's name could read or overwrite their
-  // schedule — now the caller must be that tutor (or an admin).
-  if (resource === 'availability') {
-    if (req.method === 'GET') {
-      const { tutorName } = req.query;
-      if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
-      const caller = await requireAuth(req, res);
-      if (!caller) return;
-      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
-      try {
-        const profiles = await dbGet(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}&limit=1`);
-        return res.status(200).json({ slots: profiles[0]?.availability || [] });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
-    }
-    if (req.method === 'POST') {
-      const { tutorName, slots } = req.body || {};
-      if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
-      const caller = await requireAuth(req, res);
-      if (!caller) return;
-      if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
-      try {
-        const r = await supabaseRequest(`/profiles?tutor_name=eq.${encodeURIComponent(tutorName)}`, {
-          method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ availability: slots || [] }),
-        });
-        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
-        return res.status(200).json({ success: true });
-      } catch(e) { return res.status(500).json({ error: e.message }); }
-    }
-  }
-
   // ── PROGRESS HISTORY (trend over time) ───────────────────────────────────
   if (resource === 'progress-history') {
     if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
@@ -640,7 +608,7 @@ module.exports = async (req, res) => {
           <tr class="total"><td>Amount paid</td><td>&pound;${((b.fee_pence||0)/100).toFixed(2)}</td></tr>
         </table>
         ${b.stripe_payment_intent_id?`<p style="font-size:12px;color:#718096">Payment reference: ${escapeHtml(b.stripe_payment_intent_id)}</p>`:''}
-        <div class="footer">Seeds Tuition &bull; seedstuition.co.uk &bull; Thank you for choosing Seeds</div>
+        <div class="footer">Seeds Tuition &bull; seedsinstitute.co.uk &bull; Thank you for choosing Seeds</div>
         <script>window.print();</script>
       </body></html>`;
       res.setHeader('Content-Type','text/html; charset=utf-8');
