@@ -2,6 +2,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet } = require('../lib/db');
 const { getPaymentService } = require('../lib/payments');
+const { refundBooking } = require('../lib/refunds');
 const { isValidId, normalizeEmail } = require('../lib/validate');
 const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
@@ -21,34 +22,37 @@ module.exports = async (req, res) => {
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
       if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
       try {
-        const { supabaseRequest, dbGet } = require('../lib/db');
+        const { dbPatch } = require('../lib/db');
 
-        // Fetch booking to check if it was paid
         const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
         const booking = bookings[0];
-        let refundId = null;
+        if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-        // Issue a refund if there was a payment
-        if (booking?.stripe_payment_intent_id) {
-          try {
-            const payments = getPaymentService();
-            const refund = await payments.createRefund({
-              paymentIntentId: booking.stripe_payment_intent_id,
-              reason: 'requested_by_customer',
-            });
-            refundId = refund.id;
-          } catch(refundErr) {
-            // Log but don't block the cancellation
-            console.warn('Refund failed:', refundErr.message);
-          }
+        // Always a full refund of the booking's own fee — policy is to eat
+        // any Stripe processing fee rather than prorate, since billing only
+        // ever happens after the lesson (never in advance). Resolves the
+        // PaymentIntent whether the booking was charged directly (older
+        // ad-hoc-checkout path) or as part of a periodic billing_batches
+        // charge (SCRUM-56).
+        let refundResult = { refunded: false };
+        let refundError = null;
+        try {
+          refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
+        } catch(refundErr) {
+          // Log but don't block the cancellation
+          console.warn('Refund failed:', refundErr.message);
+          refundError = refundErr.message;
         }
 
-        const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
-          method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ status: 'cancelled' }),
+        const patch = { status: 'cancelled' };
+        if (refundResult.refunded) patch.payment_status = 'refunded';
+        await dbPatch(`/bookings?id=eq.${bookingId}`, patch);
+        return res.status(200).json({
+          success: true,
+          refundId: refundResult.refundId || null,
+          refunded: refundResult.refunded,
+          refundError,
         });
-        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
-        return res.status(200).json({ success: true, refundId, refunded: !!refundId });
       } catch(e) { return res.status(500).json({ error: e.message }); }
     }
     if (action === 'refund-booking') {
@@ -57,17 +61,30 @@ module.exports = async (req, res) => {
       // revenue dashboard's "Refund management" panel.
       if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
       try {
+        const { dbPatch } = require('../lib/db');
         const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
         const booking = bookings[0];
         if (!booking) return res.status(404).json({ error: 'Booking not found' });
-        if (!booking.stripe_payment_intent_id) return res.status(400).json({ error: 'This booking has no associated payment to refund' });
+
+        let paymentIntentId = booking.stripe_payment_intent_id;
+        if (!paymentIntentId && booking.billing_batch_id) {
+          const batches = await dbGet(`/billing_batches?id=eq.${booking.billing_batch_id}&limit=1`);
+          paymentIntentId = batches[0]?.stripe_payment_intent_id;
+        }
+        if (!paymentIntentId) return res.status(400).json({ error: 'This booking has no associated payment to refund' });
 
         const payments = getPaymentService();
+        const amountPence = req.body.amountPence || undefined; // full refund if omitted
         const refund = await payments.createRefund({
-          paymentIntentId: booking.stripe_payment_intent_id,
-          amount: req.body.amountPence || undefined, // full refund if omitted
+          paymentIntentId,
+          amount: amountPence,
           reason: req.body.reason || 'requested_by_customer',
         });
+        // Only mark the booking itself refunded once its full fee is refunded —
+        // a partial refund (e.g. a shortened lesson) leaves it 'paid'.
+        if (!amountPence || amountPence >= booking.fee_pence) {
+          await dbPatch(`/bookings?id=eq.${bookingId}`, { payment_status: 'refunded' });
+        }
         return res.status(200).json({ success: true, refundId: refund.id, amount: refund.amount });
       } catch(e) { return res.status(500).json({ error: e.message }); }
     }

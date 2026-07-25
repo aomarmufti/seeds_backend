@@ -684,25 +684,30 @@ module.exports = async (req, res) => {
       const dayEnd = new Date(date + 'T23:59:59Z').toISOString();
       let path = `/bookings?status=eq.confirmed&start_time=gte.${dayStart}&start_time=lte.${dayEnd}`;
       if (tutorName) path += `&tutor_name=eq.${encodeURIComponent(tutorName)}`;
-      const bookings = await dbGet(path + '&select=id,stripe_payment_intent_id');
+      const bookings = await dbGet(path + '&select=id,stripe_payment_intent_id,billing_batch_id,payment_status,fee_pence');
 
-      let cancelled = 0, refunded = 0;
-      const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
+      let cancelled = 0, refunded = 0, refundFailed = 0;
+      const { refundBooking } = require('../lib/refunds');
 
       for (const b of bookings) {
-        // Refund if paid
-        if (b.stripe_payment_intent_id && stripe) {
-          try {
-            await stripe.refunds.create({ payment_intent: b.stripe_payment_intent_id, reason: 'requested_by_customer' });
-            refunded++;
-          } catch(e) { console.warn('Refund failed:', b.id, e.message); }
+        const patch = { status: 'cancelled' };
+        try {
+          const result = await refundBooking(b, { reason: 'requested_by_customer' });
+          if (result.refunded) { refunded++; patch.payment_status = 'refunded'; }
+        } catch(e) {
+          console.warn('Refund failed:', b.id, e.message);
+          refundFailed++;
         }
         await supabaseRequest(`/bookings?id=eq.${b.id}`,
-          { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled' }) }
+          { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) }
         );
         cancelled++;
       }
-      return res.status(200).json({ success: true, cancelled, refunded });
+      if (refundFailed) {
+        const { alertCritical } = require('../lib/logger');
+        await alertCritical('Bulk-cancel: some refunds failed', `${refundFailed} of ${bookings.length} refunds failed for tutor=${tutorName || 'all'} date=${date} — check Stripe dashboard.`);
+      }
+      return res.status(200).json({ success: true, cancelled, refunded, refundFailed });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
