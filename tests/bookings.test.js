@@ -233,56 +233,26 @@ test('calendly-link for "Best available match" uses any tutor with scheduling co
   assert.match(queriedPath, /calendly_event_type_uri=not\.is\.null/);
 });
 
-test('calendly-link with context=consultation resolves to the 15-min consultation link', async () => {
+// SCRUM-67: the Calendly account's free plan only allows one active event
+// type at all, so consultation/trial-lesson/regular-lesson bookings now all
+// share the tutor's single calendly_event_type_uri — lessonType/context no
+// longer change which link is minted.
+test('calendly-link ignores lessonType/context and always resolves to the tutor\'s single shared event type', async () => {
   const handler = loadWithMocks('api/bookings.js', {
     db: {
-      dbGet: async () => [{
-        calendly_trial_event_type_uri: 'https://calendly.com/roots-academy/initial-consultation',
-        calendly_trial_lesson_event_type_uri: 'https://calendly.com/roots-academy/trial-lesson',
-        calendly_event_type_uri: 'https://calendly.com/roots-academy/30min',
-      }],
+      dbGet: async () => [{ calendly_event_type_uri: 'https://calendly.com/roots-academy/30min' }],
     },
   });
-  const res = makeRes();
-  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial', context: 'consultation' } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.url, 'https://calendly.com/roots-academy/initial-consultation');
-});
 
-// The portal (student/tutor) booking a trial LESSON — not the public
-// wizard's consultation — must never resolve to the 15-min consultation
-// link (SCRUM follow-up: this is exactly the bug where "Add a lesson" ->
-// "Free trial" showed a 15-minute Calendly event instead of a real lesson).
-test('calendly-link with lessonType=trial and no context resolves to the trial-lesson link, not the consultation link', async () => {
-  const handler = loadWithMocks('api/bookings.js', {
-    db: {
-      dbGet: async () => [{
-        calendly_trial_event_type_uri: 'https://calendly.com/roots-academy/initial-consultation',
-        calendly_trial_lesson_event_type_uri: 'https://calendly.com/roots-academy/trial-lesson',
-        calendly_event_type_uri: 'https://calendly.com/roots-academy/30min',
-      }],
-    },
-  });
-  const res = makeRes();
-  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial' } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.url, 'https://calendly.com/roots-academy/trial-lesson');
-});
+  const withContext = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial', context: 'consultation' } }, withContext);
+  assert.equal(withContext.statusCode, 200);
+  assert.equal(withContext.body.url, 'https://calendly.com/roots-academy/30min');
 
-test('calendly-link for a trial lesson falls back to the regular lesson link (not the consultation link) when no trial-lesson link is configured', async () => {
-  const handler = loadWithMocks('api/bookings.js', {
-    db: {
-      dbGet: async () => [{
-        calendly_trial_event_type_uri: 'https://calendly.com/roots-academy/initial-consultation',
-        calendly_trial_lesson_event_type_uri: null,
-        calendly_event_type_uri: 'https://calendly.com/roots-academy/30min',
-      }],
-    },
-  });
-  const res = makeRes();
-  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial' } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.url, 'https://calendly.com/roots-academy/30min');
+  const withLessonType = makeRes();
+  await handler({ method: 'GET', query: { action: 'calendly-link', tutorName: 'Suleiman', lessonType: 'trial' } }, withLessonType);
+  assert.equal(withLessonType.statusCode, 200);
+  assert.equal(withLessonType.body.url, 'https://calendly.com/roots-academy/30min');
 });
 
 test('calendly-link 404s for a tutor with no Calendly event type configured', async () => {

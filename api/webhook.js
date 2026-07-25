@@ -314,20 +314,15 @@ async function handleInviteeCreated(payload) {
     return;
   }
 
-  // A booked event type can be the regular-lesson link, the initial-
-  // consultation link, or the trial-lesson link (SCRUM-55 follow-up /
-  // bookings.js's three-column calendly-link resolver) — check all three,
-  // and read from the canonical `tutors` table like the forward link
-  // generator does (a tutor may not have a `profiles` row yet).
-  const encodedEventTypeUri = encodeURIComponent(parsed.eventTypeUri);
-  const [byLessonUri, byTrialUri, byTrialLessonUri] = await Promise.all([
-    dbGet(`/tutors?calendly_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
-    dbGet(`/tutors?calendly_trial_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
-    dbGet(`/tutors?calendly_trial_lesson_event_type_uri=eq.${encodedEventTypeUri}&limit=1`),
-  ]);
-  const tutorName = byLessonUri[0]?.name || byTrialUri[0]?.name || byTrialLessonUri[0]?.name || lead.assigned_tutor;
+  // SCRUM-67: every tutor now shares the same single Calendly event type
+  // (the account's free plan only allows one active event type at all), so
+  // the booked event type URI can no longer disambiguate which tutor was
+  // booked — the lead's own assigned_tutor is the only reliable source of
+  // truth here (set when the lead was assigned, before the scheduling link
+  // was ever sent).
+  const tutorName = lead.assigned_tutor;
   if (!tutorName) {
-    console.warn(`Calendly invitee.created: no tutor resolved for event type ${parsed.eventTypeUri}`);
+    console.warn(`Calendly invitee.created: lead ${lead.id} has no assigned tutor`);
     return;
   }
 
