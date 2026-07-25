@@ -146,4 +146,5 @@ test('POST payouts approve-and-transfer only completes bookings the student has 
   assert.equal(res.statusCode, 200);
   assert.ok(queriedPath.includes('status=eq.confirmed'));
   assert.ok(queriedPath.includes('payment_status=eq.paid'), 'must not complete a booking the family has not paid for yet');
+  assert.ok(queriedPath.includes('end_time=lte.'), 'must not complete a booking for a lesson that hasn\'t happened yet');
 });

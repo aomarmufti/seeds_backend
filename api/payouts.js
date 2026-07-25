@@ -163,13 +163,16 @@ module.exports = async (req, res) => {
       });
       const stripe = getStripe();
       try {
-        // Only mark a booking "tutor paid out" if the student has actually
-        // paid for it (payment_status='paid') — under periodic billing a
-        // booking is confirmed the moment it's made regardless of billing
-        // status, so status=confirmed alone (the old check) would let an
-        // admin pay a tutor out for lessons never actually charged.
+        // Only mark a booking "tutor paid out" if (a) the student has
+        // actually paid for it (payment_status='paid') — under periodic
+        // billing a booking is confirmed the moment it's made regardless of
+        // billing status, so status=confirmed alone (the old check) would
+        // let an admin pay a tutor out for lessons never actually charged —
+        // and (b) the lesson has actually happened (end_time in the past);
+        // a family billed in advance of a lesson that hasn't run yet must
+        // never turn into an early payout for it.
         await supabaseRequest(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0`,
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${new Date().toISOString()}`,
           { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
         );
         let transferId = null, transferStatus = 'manual';
