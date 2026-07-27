@@ -263,14 +263,19 @@ module.exports = async (req, res) => {
         meet_link: meetingLink,
       });
 
-      await sendBookingConfirmation({
-        studentName, parentName: parentName || studentName,
-        parentEmail, parentPhone: parentPhone || null,
-        tutorName, subject, lessonType: 'consultation', studentLevel,
-        startTime, durationMins: pricing.duration,
-        meetingLink, amountPence: pricing.amount,
-        paymentIntentId: paymentIntentId || null,
-      });
+      // Best-effort — the booking above already committed; an email
+      // provider hiccup must not turn a successful booking into a client-
+      // visible failure (matches api/leads.js's handling of the same call).
+      try {
+        await sendBookingConfirmation({
+          studentName, parentName: parentName || studentName,
+          parentEmail, parentPhone: parentPhone || null,
+          tutorName, subject, lessonType: 'consultation', studentLevel,
+          startTime, durationMins: pricing.duration,
+          meetingLink, amountPence: pricing.amount,
+          paymentIntentId: paymentIntentId || null,
+        });
+      } catch (e) { console.warn('Booking confirmation email failed:', e.message); }
 
       return res.status(200).json({ success: true, meetingLink });
     } catch(e) {
