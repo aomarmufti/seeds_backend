@@ -38,3 +38,4 @@ jobs:
           TARGET_URL: ${{ inputs.target_url }}
           CONCURRENCY: ${{ inputs.concurrency }}
           TUTOR_NAME: ${{ inputs.tutor_name }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}

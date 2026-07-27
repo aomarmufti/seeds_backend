@@ -29,8 +29,12 @@
 //   CONCURRENCY=10        (number of simultaneous booking attempts, default 10)
 //   START_TIME=<ISO date> (defaults to 7 days from now at 15:00 UTC)
 //   SUBJECT="Maths"
-//   LESSON_TYPE=trial
-//   STUDENT_LEVEL=GCSE
+//   LESSON_TYPE=consultation
+//   STUDENT_LEVEL=gcse
+//   VERCEL_AUTOMATION_BYPASS_SECRET  (required if TARGET_URL has Vercel
+//     Deployment Protection enabled, which is the default for preview
+//     deployments on a team project — generate under Project Settings ->
+//     Deployment Protection -> Protection Bypass for Automation)
 
 const TARGET_URL = process.env.TARGET_URL;
 if (!TARGET_URL) {
@@ -54,6 +58,8 @@ const START_TIME = process.env.START_TIME || (() => {
   return d.toISOString();
 })();
 
+const BYPASS_SECRET = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+
 async function attemptBooking(i) {
   const res = await fetch(`${TARGET_URL}/api/bookings?action=confirm`, {
     method: 'POST',
@@ -64,6 +70,7 @@ async function attemptBooking(i) {
       // actually testing — this script needs its own synthetic identity
       // per attempt, not real client throttling.
       'X-Forwarded-For': `203.0.113.${i % 254 + 1}`,
+      ...(BYPASS_SECRET ? { 'x-vercel-protection-bypass': BYPASS_SECRET } : {}),
     },
     body: JSON.stringify({
       studentName: `Load Test Student ${i}`,
