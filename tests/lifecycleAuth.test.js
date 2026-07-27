@@ -190,6 +190,38 @@ test('resource=lessons creates a trial booking as confirmed immediately (free, n
   assert.equal(posted.payment_status, 'free', 'a free trial has nothing to bill, ever');
 });
 
+// SCRUM-69: the student portal now offers booking a free trial lesson,
+// making bookings_one_trial_per_student reachable through a real user
+// flow for the first time. The frontend gates the option client-side,
+// but the DB constraint is the real backstop for races (e.g. two tabs) —
+// same friendly-409 treatment as the sibling consultation constraint in
+// api/bookings.js.
+test('resource=lessons returns a friendly 409 when the student already has a trial booking', async () => {
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    db: {
+      ...dbForOwnership({ hasBooking: false }),
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
+        return [];
+      },
+      dbPost: async (path) => {
+        if (path === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_trial_per_student"');
+        return { id: 'b1' };
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'trial', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.conflict, true);
+  assert.match(res.body.error, /trial/i);
+});
+
 // Periodic billing replaced book-now-pay-now entirely: a lesson's own
 // status is 'confirmed' the moment it's booked regardless of lesson type —
 // payment is deferred to the family's own weekly/monthly billing cycle
