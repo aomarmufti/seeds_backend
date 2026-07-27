@@ -1,0 +1,40 @@
+name: concurrency load test (manual)
+# SCRUM-41/40: fires many simultaneous booking-confirmation requests at a
+# real Postgres-backed deployment to prove bookings_no_tutor_overlap holds
+# under actual concurrency, not just the mocked unit test in tests/concurrency.test.js.
+# Manual-only (workflow_dispatch, no push/pull_request trigger) — this hits a
+# real deployment and creates real rows, so it must never run automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Deployment to test against (never production)'
+        required: true
+        default: 'https://seeds-backend-git-claude-new-session-flf6nw-seedsacademy.vercel.app'
+      concurrency:
+        description: 'Number of simultaneous booking attempts'
+        required: false
+        default: '10'
+      tutor_name:
+        description: 'Tutor name to target (must exist as a free-text name; no tutors table row required)'
+        required: false
+        default: 'Azeem Omar-Mufti'
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Refuse to target production
+        run: |
+          case "${{ inputs.target_url }}" in
+            *seeds-backend-six*|*seedsinstitute*) echo "Refusing to load-test what looks like production." >&2; exit 1 ;;
+          esac
+      - run: node scripts/load-test-concurrent-booking.js
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+          TUTOR_NAME: ${{ inputs.tutor_name }}
