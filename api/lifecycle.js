@@ -333,6 +333,18 @@ module.exports = async (req, res) => {
         ...(skipped.length ? { note: `${skipped.length} slot(s) skipped due to conflicts` } : {}),
       });
     } catch (e) {
+      // SCRUM-69: the student portal now offers booking a free trial
+      // lesson, making this constraint reachable through a real user flow
+      // for the first time (previously only api/bookings.js's public
+      // consultation path could hit its sibling constraint). Same
+      // friendly-409 treatment as the existing tutor-overlap/consultation
+      // guards below — see api/bookings.js's confirm handler.
+      if (e.message.includes('bookings_one_trial_per_student')) {
+        return res.status(409).json({
+          error: 'This student has already booked their free trial lesson.',
+          conflict: true,
+        });
+      }
       return res.status(500).json({ error: e.message });
     }
   }
