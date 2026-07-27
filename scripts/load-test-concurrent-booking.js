@@ -41,8 +41,12 @@ if (!TARGET_URL) {
 const CONCURRENCY = Number(process.env.CONCURRENCY || 10);
 const TUTOR_NAME = process.env.TUTOR_NAME || 'Azeem Omar-Mufti';
 const SUBJECT = process.env.SUBJECT || 'Maths';
-const LESSON_TYPE = process.env.LESSON_TYPE || 'trial';
-const STUDENT_LEVEL = process.env.STUDENT_LEVEL || 'GCSE';
+// SCRUM-58: api/bookings.js action=confirm (the public, unauthenticated
+// endpoint this script targets) now rejects any lessonType other than
+// 'consultation' — the only thing it ever creates. Using the old 'trial'
+// default here would 400 every attempt before the race is ever exercised.
+const LESSON_TYPE = process.env.LESSON_TYPE || 'consultation';
+const STUDENT_LEVEL = process.env.STUDENT_LEVEL || 'gcse';
 const START_TIME = process.env.START_TIME || (() => {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() + 7);
