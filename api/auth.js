@@ -69,7 +69,68 @@ module.exports = async (req, res) => {
         { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(updates) }
       );
       if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      // SCRUM-85: approving only ever flipped profiles.role, but every
+      // Students view (admin's list, the tutor portal's roster, the student
+      // portal's own record lookup, lifecycle/booking endpoints) reads the
+      // students table — which until now was written only by an actual
+      // booking. An approved student was therefore a login with no student
+      // record: invisible to admin and unassignable. Upsert it here so
+      // approval alone is enough to make them real.
+      if (approvedRole === 'student') {
+        const profiles = await dbGet(`/profiles?id=eq.${userId}&select=email,full_name&limit=1`);
+        const profile = profiles[0];
+        const email = (profile?.email || '').trim().toLowerCase();
+        if (email) {
+          const existing = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&limit=1`);
+          if (!existing.length) {
+            await supabaseRequest('/students', {
+              method: 'POST', prefer: 'return=minimal',
+              body: JSON.stringify({
+                parent_email: email,
+                parent_name: profile?.full_name || email,
+                student_name: profile?.full_name || email,
+              }),
+            });
+          }
+        }
+      }
       await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── ASSIGN / REASSIGN A STUDENT'S TUTOR (SCRUM-86) ────────
+  // profiles.assigned_tutor existed but nothing ever wrote to it outside
+  // the initial lead assignment, so admin had no way to give a student a
+  // tutor (or move them to a different one) after the fact.
+  if (action === 'assign-tutor') {
+    const { userId, tutorName } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    try {
+      const r = await supabaseRequest('/profiles?id=eq.' + userId, {
+        method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ assigned_tutor: tutorName || null }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── DEACTIVATE ANY ACCOUNT (SCRUM-86) ─────────────────────
+  // Same ban-and-mark approach as deactivate-tutor below, but role-agnostic
+  // so a student account can be removed too. Never hard-deletes — past
+  // bookings, payouts and safeguarding history must survive.
+  if (action === 'deactivate-account') {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    if (userId === admin.id) return res.status(400).json({ error: 'You cannot deactivate your own account' });
+    try {
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId,
+        { method: 'PUT', body: JSON.stringify({ ban_duration: '876600h' }) }
+      );
+      await supabaseRequest('/profiles?id=eq.' + userId,
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'deactivated' }) }
+      );
       return res.status(200).json({ success: true });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }

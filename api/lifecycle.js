@@ -328,7 +328,17 @@ module.exports = async (req, res) => {
           // not charged (or a payment link emailed) the moment it's
           // booked. status is purely the lesson's own lifecycle; whether
           // it's been paid for is tracked separately via payment_status.
-          status: 'confirmed',
+          // SCRUM-87: a free session a student books for themselves (their
+          // Initial Consultation, or the trial that follows it) lands as
+          // 'requested' — it shows in their calendar straight away tagged
+          // "Pending tutor confirmation", and the tutor confirms it from
+          // their own portal. Anything a tutor books, and every paid
+          // lesson, is confirmed outright as before. 'requested' is already
+          // an allowed status and still holds the slot against
+          // bookings_no_tutor_overlap, so it can't be double-booked; every
+          // payout path filters on confirmed + paid + fee > 0, so a
+          // requested free session can never be paid out.
+          status: (!isTutor && fee === 0) ? 'requested' : 'confirmed',
           payment_status: fee === 0 ? 'free' : 'unbilled',
           meet_link: meetingLink,
         });
@@ -741,6 +751,55 @@ module.exports = async (req, res) => {
   // A frontend modal for this (tpOpenSelfManage) already existed but was
   // unreachable: it called the admin-only endpoint directly, which would
   // 403 for a non-admin tutor even if wired up.
+  // SCRUM-87: tutor accepts a free session a student requested for
+  // themselves, flipping it from 'requested' to a normal confirmed booking
+  // and sending the family the usual confirmation + meeting link.
+  if (resource === 'confirm-booking') {
+    if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { bookingId } = req.body || {};
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
+    try {
+      const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+      const booking = bookings[0];
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (!(await verifyTutorIdentity(caller, booking.tutor_name))) return res.status(403).json({ error: 'Forbidden' });
+      if (booking.status === 'cancelled') return res.status(409).json({ error: 'This request was cancelled.' });
+      if (booking.status !== 'requested') return res.status(409).json({ error: 'This lesson is already confirmed.' });
+
+      const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+        method: 'PATCH', prefer: 'return=representation',
+        body: JSON.stringify({ status: 'confirmed' }),
+      });
+      const updated = await r.json();
+      if (!r.ok) throw new Error(JSON.stringify(updated));
+
+      try {
+        const students = await dbGet(`/students?id=eq.${booking.student_id}&limit=1`);
+        const student = students[0];
+        if (student?.parent_email) {
+          const { sendBookingConfirmation } = require('../lib/reminders');
+          await sendBookingConfirmation({
+            parentName: student.parent_name || student.student_name,
+            parentEmail: student.parent_email,
+            studentName: student.student_name,
+            tutorName: booking.tutor_name,
+            subject: booking.subject || '',
+            lessonType: booking.lesson_type,
+            startTime: booking.start_time,
+            meetLink: booking.meet_link || null,
+          });
+        }
+      } catch (mailErr) { console.warn('Confirmation email failed:', mailErr.message); }
+
+      return res.status(200).json({ success: true, booking: updated[0] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
   if (resource === 'self-cancel-booking') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
     const caller = await requireAuth(req, res);
