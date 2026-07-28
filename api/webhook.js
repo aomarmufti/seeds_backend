@@ -304,10 +304,17 @@ async function handleCalWebhook(req, res, rawBody) {
 async function handleBookingCreated(payload) {
   const parsed = parseBookingPayload(payload);
   if (!parsed.trackingId) {
-    // Booked directly on a tutor's Cal.com page without going through our
-    // lead flow — nothing to reconcile against, so just log it for manual
-    // follow-up rather than guessing at a booking record.
-    console.warn('Cal.com BOOKING_CREATED with no tracking id — skipping automatic booking creation', parsed.bookingUid);
+    // Booked directly through the public wizard, student portal, or tutor
+    // "Add lesson" flow — those all create their own bookings row up front
+    // (via api/bookings.js's action=confirm or api/lifecycle.js's
+    // resource=lessons), so there's no lead to reconcile against here.
+    // Still worth reconciling that existing row against THIS real Cal.com
+    // booking though (SCRUM-77): it was created with a static
+    // tutors.meet_link/MEET_LINK_* fallback, not the real per-event link
+    // Cal.com just generated (e.g. via its own Google Calendar/Meet
+    // integration) — without this, the family's calendar invite and our
+    // own confirmation/reminder emails can point at two different rooms.
+    await reconcileMeetingLink(parsed);
     return;
   }
 
@@ -326,7 +333,9 @@ async function handleBookingCreated(payload) {
 
   const pricing = resolvePrice('consultation', lead.level);
   const durationMins = Math.round((new Date(parsed.endTime) - new Date(parsed.startTime)) / 60000) || pricing.duration;
-  const meetingLink = await getMeetingLink(tutorName);
+  // Prefer the real link Cal.com generated for this specific booking
+  // (SCRUM-77) over the static tutors.meet_link/MEET_LINK_* fallback.
+  const meetingLink = parsed.meetingLink || await getMeetingLink(tutorName);
 
   const leadEmail = normalizeEmail(lead.email);
   const existingStudents = await dbGet(`/students?parent_email=eq.${encodeURIComponent(leadEmail)}&limit=1`);
@@ -359,6 +368,45 @@ async function handleBookingCreated(payload) {
     tutorName, subject: lead.subject, lessonType: 'consultation', studentLevel: lead.level,
     startTime: parsed.startTime, durationMins, meetingLink, amountPence: 0,
   });
+}
+
+// SCRUM-77: attaches this real Cal.com booking to whichever existing
+// bookings row it corresponds to, for any flow that creates its own row up
+// front rather than going through the lead/trackingId path above (public
+// wizard, student portal, tutor "Add lesson"). Matched by tutor + exact
+// start time rather than anything from the booking creation call itself,
+// since none of those pass a bookingUid through at creation time — Cal.com
+// is the only place that ever learns it. Best-effort: never blocks the
+// webhook's 200 response, just logs and moves on if nothing matches.
+async function reconcileMeetingLink(parsed) {
+  if (!parsed.organizerEmail || !parsed.startTime) {
+    console.warn('Cal.com BOOKING_CREATED with no tracking id and no organizer/startTime to reconcile against', parsed.bookingUid);
+    return;
+  }
+  try {
+    const tutors = await dbGet(`/tutors?email=eq.${encodeURIComponent(parsed.organizerEmail)}&select=name&limit=1`);
+    const tutorName = tutors[0]?.name;
+    if (!tutorName) {
+      console.warn(`Cal.com BOOKING_CREATED: no tutor found for organizer ${parsed.organizerEmail}`);
+      return;
+    }
+    const bookings = await dbGet(
+      `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&start_time=eq.${encodeURIComponent(parsed.startTime)}` +
+      `&cal_booking_uid=is.null&status=neq.cancelled&limit=1`
+    );
+    const booking = bookings[0];
+    if (!booking) {
+      console.warn(`Cal.com BOOKING_CREATED: no matching booking for ${tutorName} at ${parsed.startTime}`);
+      return;
+    }
+    const patch = { cal_booking_uid: parsed.bookingUid };
+    if (parsed.meetingLink) patch.meet_link = parsed.meetingLink;
+    await supabaseRequest(`/bookings?id=eq.${booking.id}`, {
+      method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch),
+    });
+  } catch (err) {
+    logError('webhook.cal.reconcileMeetingLink', err);
+  }
 }
 
 async function handleBookingCancelled(payload) {
