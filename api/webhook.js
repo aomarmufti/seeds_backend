@@ -246,6 +246,13 @@ async function markBillingBatchPaid(billingBatchId, paymentIntentId) {
 // environment — written to the documented v2 webhook payload shape.
 
 async function handleCalWebhook(req, res, rawBody) {
+  // TEMPORARY — SCRUM-77 diagnostic, revert before merge. Logs the raw
+  // payload (before signature check, so even a failed/test delivery is
+  // captured) so we can confirm the real field name Cal.com uses for its
+  // generated meeting link, which lib/cal.js's extractMeetingLink is
+  // currently only guessing at.
+  console.log('SCRUM77_DEBUG_PAYLOAD:', rawBody.toString('utf8'));
+
   if (!process.env.CAL_WEBHOOK_SIGNING_SECRET) {
     return res.status(500).json({ error: 'Cal.com webhook not configured' });
   }
