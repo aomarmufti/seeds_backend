@@ -21,7 +21,7 @@ function mockPackage(pkgName, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, calendly, nodemailer, payments } = {}) {
+function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validate, tutors, cal, nodemailer, payments } = {}) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
 
   mockPackage('nodemailer', {
@@ -70,12 +70,10 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     registerTutor: async () => {},
     ...tutors,
   });
-  mockModule('lib/calendly.js', {
-    createSchedulingLink: async () => 'https://calendly.com/seeds-tuition/lesson',
+  mockModule('lib/cal.js', {
     verifyWebhookSignature: () => {},
-    parseInviteeCreatedPayload: () => ({}),
-    getScheduledEvent: async () => ({ startTime: new Date().toISOString(), endTime: new Date().toISOString() }),
-    ...calendly,
+    parseBookingPayload: () => ({}),
+    ...cal,
   });
   // Default: a refund/charge that just succeeds, so tests exercising a
   // paid-booking code path don't need real Stripe config. Pass

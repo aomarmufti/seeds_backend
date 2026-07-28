@@ -221,29 +221,35 @@ module.exports = async (req, res) => {
             });
           }
 
-          // "Calendly Booking" step: if this tutor has a Calendly event
-          // type configured, send the family a single-use scheduling
-          // link straight away instead of waiting for the tutor to
-          // manually propose slots. Tutors without Calendly set up yet
-          // keep using the manual propose-slots flow below unaffected.
-          // SCRUM-67: the connected Calendly account's free plan only
-          // allows one active event type across the whole account, so
-          // every context (including this initial-consultation send)
-          // shares the same calendly_event_type_uri now.
-          const leadEventTypeUri = tutorProfile?.calendly_event_type_uri;
-          if (leadEventTypeUri) {
+          // "Booking" step: if this tutor has their own Cal.com account set
+          // up, send the family a scheduling link straight away instead of
+          // waiting for the tutor to manually propose slots. Tutors without
+          // Cal.com set up yet keep using the manual propose-slots flow
+          // below unaffected.
+          //
+          // Reads from the canonical tutors table, not profiles — this used
+          // to read profiles.calendly_event_type_uri, a column nothing else
+          // in the codebase wrote to since SCRUM-67 moved every other
+          // booking path onto the tutors table instead. Found (and fixed)
+          // while migrating this to Cal.com: this "send a link immediately"
+          // step had been silently broken, always falling through to the
+          // manual propose-slots flow below.
+          const tutorRows = await dbGet(`/tutors?name=eq.${encodeURIComponent(updates.assigned_tutor)}&select=cal_consultation_link&limit=1`);
+          const consultationLink = tutorRows[0]?.cal_consultation_link;
+          if (consultationLink) {
             try {
-              const { createSchedulingLink } = require('../lib/calendly');
-              const { sendCalendlyBookingLink } = require('../lib/reminders');
-              const url = await createSchedulingLink({
-                eventTypeUri: leadEventTypeUri,
-                trackingId: lead.id,
-              });
-              await sendCalendlyBookingLink({
+              const { sendSchedulingLink } = require('../lib/reminders');
+              // metadata[trackingId] is echoed back on the BOOKING_CREATED
+              // webhook payload (see api/webhook.js's handleBookingCreated)
+              // — the same role Calendly's utm_content tracking param used
+              // to play. name/email prefill the booking form for the family.
+              const url = `${consultationLink}?metadata[trackingId]=${encodeURIComponent(lead.id)}`
+                + `&name=${encodeURIComponent(lead.name || '')}&email=${encodeURIComponent(lead.email || '')}`;
+              await sendSchedulingLink({
                 parentName: lead.name, parentEmail: lead.email,
                 tutorName: updates.assigned_tutor, subject: lead.subject, schedulingUrl: url,
               });
-            } catch(calendlyErr) { console.warn('Calendly scheduling link failed:', calendlyErr.message); }
+            } catch(calErr) { console.warn('Cal.com scheduling link failed:', calErr.message); }
           }
         } catch(emailErr) { console.warn('Tutor assigned email failed:', emailErr.message); }
       }

@@ -1,6 +1,6 @@
 // api/webhook.js
 // POST /api/webhook
-// Single webhook receiver for both Stripe and Calendly, dispatched by
+// Single webhook receiver for both Stripe and Cal.com, dispatched by
 // which signature header is present. Combined into one file/one
 // Vercel serverless function — Vercel's Hobby plan caps a deployment
 // at 12 functions, and this repo has grown close to that limit, so
@@ -13,7 +13,7 @@ const getRawBody = require('raw-body');
 const { getPaymentService } = require('../lib/payments');
 const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
-const { verifyWebhookSignature: verifyCalendlySignature, parseInviteeCreatedPayload } = require('../lib/calendly');
+const { verifyWebhookSignature: verifyCalSignature, parseBookingPayload } = require('../lib/cal');
 const { getMeetingLink } = require('../lib/tutors');
 const { logError, alertCritical } = require('../lib/logger');
 const { normalizeEmail } = require('../lib/validate');
@@ -32,8 +32,8 @@ module.exports = async (req, res) => {
   if (req.headers['stripe-signature']) {
     return handleStripeWebhook(req, res, rawBody);
   }
-  if (req.headers['calendly-webhook-signature']) {
-    return handleCalendlyWebhook(req, res, rawBody);
+  if (req.headers['x-cal-signature-256']) {
+    return handleCalWebhook(req, res, rawBody);
   }
   return res.status(400).json({ error: 'Unrecognised webhook source (no known signature header)' });
 };
@@ -229,27 +229,31 @@ async function markBillingBatchPaid(billingBatchId, paymentIntentId) {
   console.log(`✅ Billing batch paid: ${billingBatchId}`);
 }
 
-// ── Calendly ─────────────────────────────────────────────────────────────
-// invitee.created creates the bookings row, confirmed immediately
-// regardless of lesson type — payment for paid lesson types is no longer
-// collected here. It's billed periodically per the family's own
-// billing_cycle (see api/billing.js resource=billing-cron), the same as
-// every other booking-creation path on the platform. Free trials are
-// simply marked payment_status='free' since there's nothing to bill.
-// invitee.canceled cancels the linked booking.
+// ── Cal.com ──────────────────────────────────────────────────────────────
+// BOOKING_CREATED creates the bookings row for a family who booked their
+// free Initial Consultation via a link emailed from api/leads.js's
+// assign-tutor flow — the only thing that flow ever sends is
+// cal_consultation_link, so the resulting booking is always
+// lesson_type='consultation', matching how api/bookings.js's own
+// action=confirm creates the same kind of booking for the public wizard's
+// direct embedded-widget flow (SCRUM-58 split the free "Initial
+// Consultation" out from the trial lesson booked separately afterward from
+// the portal — this handler predates that split and was still inferring
+// gcse/alevel/trial here under Calendly; fixed alongside this migration).
+// BOOKING_CANCELLED cancels the linked booking.
 //
-// Not verified against a live Calendly account/webhook in this
-// environment — written to the documented v2 API/webhook payload shape.
+// Not verified against a live Cal.com account/webhook in this
+// environment — written to the documented v2 webhook payload shape.
 
-async function handleCalendlyWebhook(req, res, rawBody) {
-  if (!process.env.CALENDLY_WEBHOOK_SIGNING_KEY) {
-    return res.status(500).json({ error: 'Calendly webhook not configured' });
+async function handleCalWebhook(req, res, rawBody) {
+  if (!process.env.CAL_WEBHOOK_SIGNING_SECRET) {
+    return res.status(500).json({ error: 'Cal.com webhook not configured' });
   }
 
   try {
-    verifyCalendlySignature(rawBody.toString('utf8'), req.headers['calendly-webhook-signature'], process.env.CALENDLY_WEBHOOK_SIGNING_KEY);
+    verifyCalSignature(rawBody.toString('utf8'), req.headers['x-cal-signature-256'], process.env.CAL_WEBHOOK_SIGNING_SECRET);
   } catch (err) {
-    logError('webhook.calendly.signature', err);
+    logError('webhook.cal.signature', err);
     return res.status(400).json({ error: err.message });
   }
 
@@ -259,19 +263,19 @@ async function handleCalendlyWebhook(req, res, rawBody) {
   } catch (err) {
     return res.status(400).json({ error: 'Invalid JSON body' });
   }
-  const { event, payload } = body || {};
+  const { triggerEvent, payload } = body || {};
   if (!payload) return res.status(400).json({ error: 'Missing payload' });
 
-  // Idempotency: Calendly's payload doesn't include a single canonical
-  // event id the way Stripe's does, so the invitee URI + event name is
-  // the most stable dedup key available (an invitee can only be created
-  // or cancelled once each).
-  const dedupKey = `${payload.uri || 'unknown'}:${event}`;
+  // Idempotency: Cal.com bookings carry a single canonical `uid`, unlike
+  // Calendly's separate event/invitee URIs — paired with the trigger event
+  // name since a booking can be created, then later cancelled (two
+  // distinct events sharing the same uid).
+  const dedupKey = `${payload.uid || 'unknown'}:${triggerEvent}`;
   try {
-    const dedupRes = await supabaseRequest('/calendly_webhook_events', {
+    const dedupRes = await supabaseRequest('/cal_webhook_events', {
       method: 'POST',
       prefer: 'return=minimal',
-      body: JSON.stringify({ event_id: dedupKey, event_type: event }),
+      body: JSON.stringify({ event_id: dedupKey, event_type: triggerEvent }),
     });
     if (!dedupRes.ok) {
       if (dedupRes.status === 409) return res.status(200).json({ received: true, duplicate: true });
@@ -279,56 +283,49 @@ async function handleCalendlyWebhook(req, res, rawBody) {
       throw new Error(errBody.message || `Dedup insert failed with status ${dedupRes.status}`);
     }
   } catch (err) {
-    logError('webhook.calendly.dedup', err);
+    logError('webhook.cal.dedup', err);
     return res.status(500).json({ error: 'Webhook dedup check failed' });
   }
 
   try {
-    if (event === 'invitee.created') {
-      await handleInviteeCreated(payload);
-    } else if (event === 'invitee.canceled') {
-      await handleInviteeCanceled(payload);
+    if (triggerEvent === 'BOOKING_CREATED') {
+      await handleBookingCreated(payload);
+    } else if (triggerEvent === 'BOOKING_CANCELLED') {
+      await handleBookingCancelled(payload);
     }
     return res.status(200).json({ received: true });
   } catch (err) {
-    logError('webhook.calendly.handling', err);
-    await alertCritical('Calendly webhook processing failed', `event=${event} dedupKey=${dedupKey}: ${err.message}`);
+    logError('webhook.cal.handling', err);
+    await alertCritical('Cal.com webhook processing failed', `event=${triggerEvent} dedupKey=${dedupKey}: ${err.message}`);
     return res.status(500).json({ error: err.message });
   }
 }
 
-async function handleInviteeCreated(payload) {
-  const parsed = parseInviteeCreatedPayload(payload);
+async function handleBookingCreated(payload) {
+  const parsed = parseBookingPayload(payload);
   if (!parsed.trackingId) {
-    // Booked directly on a tutor's Calendly page without going through
-    // our lead flow — nothing to reconcile against, so just log it for
-    // manual follow-up rather than guessing at a booking record.
-    console.warn('Calendly invitee.created with no tracking id — skipping automatic booking creation', parsed.eventUri);
+    // Booked directly on a tutor's Cal.com page without going through our
+    // lead flow — nothing to reconcile against, so just log it for manual
+    // follow-up rather than guessing at a booking record.
+    console.warn('Cal.com BOOKING_CREATED with no tracking id — skipping automatic booking creation', parsed.bookingUid);
     return;
   }
 
   const leads = await dbGet(`/leads?id=eq.${parsed.trackingId}&limit=1`);
   const lead = leads[0];
   if (!lead) {
-    console.warn(`Calendly invitee.created references unknown lead ${parsed.trackingId}`);
+    console.warn(`Cal.com BOOKING_CREATED references unknown lead ${parsed.trackingId}`);
     return;
   }
 
-  // SCRUM-67: every tutor now shares the same single Calendly event type
-  // (the account's free plan only allows one active event type at all), so
-  // the booked event type URI can no longer disambiguate which tutor was
-  // booked — the lead's own assigned_tutor is the only reliable source of
-  // truth here (set when the lead was assigned, before the scheduling link
-  // was ever sent).
   const tutorName = lead.assigned_tutor;
   if (!tutorName) {
-    console.warn(`Calendly invitee.created: lead ${lead.id} has no assigned tutor`);
+    console.warn(`Cal.com BOOKING_CREATED: lead ${lead.id} has no assigned tutor`);
     return;
   }
 
-  const durationMins = Math.round((new Date(parsed.endTime) - new Date(parsed.startTime)) / 60000) || 55;
-  const lessonType = lead.notes && /trial/i.test(lead.notes) ? 'trial' : (lead.level === 'alevel' ? 'alevel' : 'gcse');
-  const pricing = resolvePrice(lessonType, lead.level);
+  const pricing = resolvePrice('consultation', lead.level);
+  const durationMins = Math.round((new Date(parsed.endTime) - new Date(parsed.startTime)) / 60000) || pricing.duration;
   const meetingLink = await getMeetingLink(tutorName);
 
   const leadEmail = normalizeEmail(lead.email);
@@ -337,20 +334,18 @@ async function handleInviteeCreated(payload) {
     ? existingStudents[0]
     : await dbPost('/students', { parent_name: lead.name, parent_email: leadEmail, student_name: lead.name });
 
-  const isFree = pricing.amount === 0;
   await dbPost('/bookings', {
     student_id: student.id,
     tutor_name: tutorName,
     subject: lead.subject,
-    lesson_type: lessonType,
+    lesson_type: 'consultation',
     start_time: parsed.startTime,
     duration_mins: durationMins,
-    fee_pence: pricing.amount,
+    fee_pence: 0,
     status: 'confirmed',
-    payment_status: isFree ? 'free' : 'unbilled',
+    payment_status: 'free',
     meet_link: meetingLink,
-    calendly_event_uri: parsed.eventUri,
-    calendly_invitee_uri: parsed.inviteeUri,
+    cal_booking_uid: parsed.bookingUid,
   });
 
   await supabaseRequest(`/leads?id=eq.${lead.id}`, {
@@ -361,16 +356,16 @@ async function handleInviteeCreated(payload) {
   const { sendBookingConfirmation } = require('../lib/reminders');
   await sendBookingConfirmation({
     studentName: lead.name, parentName: lead.name, parentEmail: lead.email,
-    tutorName, subject: lead.subject, lessonType, studentLevel: lead.level,
-    startTime: parsed.startTime, durationMins, meetingLink, amountPence: pricing.amount,
+    tutorName, subject: lead.subject, lessonType: 'consultation', studentLevel: lead.level,
+    startTime: parsed.startTime, durationMins, meetingLink, amountPence: 0,
   });
 }
 
-async function handleInviteeCanceled(payload) {
-  const parsed = parseInviteeCreatedPayload(payload);
-  if (!parsed.inviteeUri) return;
+async function handleBookingCancelled(payload) {
+  const parsed = parseBookingPayload(payload);
+  if (!parsed.bookingUid) return;
   await supabaseRequest(
-    `/bookings?calendly_invitee_uri=eq.${encodeURIComponent(parsed.inviteeUri)}&status=in.(scheduled,confirmed)`,
+    `/bookings?cal_booking_uid=eq.${encodeURIComponent(parsed.bookingUid)}&status=in.(scheduled,confirmed)`,
     { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled' }) }
   );
 }
