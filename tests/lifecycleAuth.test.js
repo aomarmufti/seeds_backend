@@ -190,6 +190,37 @@ test('resource=lessons creates a trial booking as confirmed immediately (free, n
   assert.equal(posted.payment_status, 'free', 'a free trial has nothing to bill, ever');
 });
 
+// A student booking their own free Initial Consultation. Regression guard
+// for a live bug: lifecycle.js priced lessons from a local feeMap of
+// gcse/alevel/group/trial with a `?? 4000` fallback and no 'consultation'
+// key, so a free 15-minute consultation was charged £40 — and because the
+// pending-confirmation flow keys off fee === 0, the request also never
+// landed as 'requested'.
+test('resource=lessons prices a student-booked consultation at zero and holds it as requested', async () => {
+  let posted;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'parent@example.com' }) },
+    db: {
+      // Caller is this student's own parent (matched on parent_email) and
+      // has no tutor_name — a real parent isn't a tutor, and that is what
+      // makes this the student-books-for-themselves path rather than a
+      // tutor scheduling on their behalf.
+      ...dbForOwnership({ hasBooking: true, tutorName: null }),
+      dbPost: async (path, body) => { if (path === '/bookings') posted = body; return { id: 'b1', ...body }; },
+    },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST', query: { resource: 'lessons' },
+    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'consultation', startTime: new Date().toISOString() },
+  }, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(posted.fee_pence, 0, 'an Initial Consultation is free — never £40');
+  assert.equal(posted.payment_status, 'free', 'nothing to bill for a consultation, ever');
+  assert.equal(posted.status, 'requested', 'a free session a student books for themselves awaits tutor confirmation');
+  assert.equal(posted.duration_mins, 15, 'a consultation is 15 minutes, not the old hardcoded 55');
+});
+
 // SCRUM-69: the student portal now offers booking a free trial lesson,
 // making bookings_one_trial_per_student reachable through a real user
 // flow for the first time. The frontend gates the option client-side,
@@ -512,9 +543,15 @@ test('resource=auto-payout only pays tutors for bookings the student has actuall
   assert.equal(res.statusCode, 200);
   assert.ok(queriedPaths.length > 0);
   queriedPaths.forEach(p => {
-    assert.ok(p.includes('status=eq.confirmed'));
     assert.ok(p.includes('payment_status=eq.paid'), 'must not pay a tutor for an unbilled or declined lesson');
-    assert.ok(p.includes('end_time=lte.'), 'must not pay a tutor for a lesson that hasn\'t happened yet');
+    // SCRUM-88: a lesson is payable because someone confirmed what happened,
+    // not because its end_time drifted into the past.
+    assert.ok(
+      p.includes('delivery_status=in.(delivered,no_show,late_cancelled)'),
+      'must not pay a tutor for a lesson nobody has confirmed happened'
+    );
+    assert.ok(!p.includes('end_time=lte.'), 'end_time must no longer stand in for attestation');
+    assert.ok(p.includes('paid_out_at=is.null'), 'must skip bookings already paid out');
   });
 });
 

@@ -45,10 +45,12 @@ function loadWithMocks(apiRelPath, { db, reminders, cors, pricing, auth, validat
     ...reminders,
   });
   mockModule('lib/cors.js', { applyCors: () => false, ...cors });
-  mockModule('lib/pricing.js', {
-    resolvePrice: () => ({ duration: 55, amount: 4000 }),
-    ...pricing,
-  });
+  // Real pricing by default. It's pure logic with no external dependency,
+  // and stubbing it to a flat £40 hid a live bug where a free consultation
+  // was charged £40 — exactly the thing these tests should catch. Pass
+  // pricing:{resolvePrice:...} to override for a specific test.
+  const realPricing = require(path.join(backendRoot, 'lib/pricing.js'));
+  mockModule('lib/pricing.js', { ...realPricing, ...pricing });
   // Default: caller is an authenticated admin, so tests exercise the
   // handler's own logic rather than the auth gate. Pass auth:{requireAdmin:...}
   // to test the unauthorized path specifically.

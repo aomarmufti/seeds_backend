@@ -170,12 +170,19 @@ module.exports = async (req, res) => {
         // billing a booking is confirmed the moment it's made regardless of
         // billing status, so status=confirmed alone (the old check) would
         // let an admin pay a tutor out for lessons never actually charged —
-        // and (b) the lesson has actually happened (end_time in the past);
-        // a family billed in advance of a lesson that hasn't run yet must
-        // never turn into an early payout for it.
+        // and (b) somebody attested to the outcome. delivery_status replaces
+        // the old end_time<=now() proxy: a past end_time never meant the
+        // lesson ran. The billable outcomes are the payable ones, including
+        // 'late_cancelled' (status='cancelled', but the tutor held the slot,
+        // so having billed the family we owe them the fee).
+        //
+        // paid_out_at, not status='completed', is now the paid-out marker —
+        // see 20260728170500_separate_payout_marker_from_status.sql. It also
+        // makes this PATCH idempotent: an already-paid booking has a
+        // non-null paid_out_at and drops out of the filter.
         await supabaseRequest(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${new Date().toISOString()}`,
-          { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&delivery_status=in.(delivered,no_show,late_cancelled)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`,
+          { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ paid_out_at: new Date().toISOString() }) }
         );
         let transferId = null, transferStatus = 'manual';
         const acct = await getTutorAccount(tutorName);

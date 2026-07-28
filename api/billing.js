@@ -74,9 +74,17 @@ module.exports = async (req, res) => {
       // week is paid" but not which specific lesson(s) that covered. Free
       // consultations/trials are excluded (fee_pence=gt.0) since they're
       // never billed and would just show as permanently "unbilled" noise.
+      //
+      // SCRUM-88: cancelled lessons are no longer filtered out wholesale.
+      // A late cancellation IS charged, and hiding the only charged lesson
+      // on an invoice is exactly how a family ends up unable to work out
+      // what they paid for. Waived cancellations are still excluded — they
+      // cost nothing and are noise here — so the filter is on the outcome
+      // rather than on status.
       const bookings = await dbGet(
-        `/bookings?student_id=in.(${studentIds.join(',')})&fee_pence=gt.0&status=neq.cancelled` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,payment_status,billing_batch_id&order=start_time.desc`
+        `/bookings?student_id=in.(${studentIds.join(',')})&fee_pence=gt.0` +
+        `&or=(status.neq.cancelled,delivery_status.eq.late_cancelled)` +
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,payment_status,billing_batch_id,delivery_status&order=start_time.desc`
       );
       return res.status(200).json({
         batches: batches.map(b => ({
@@ -89,6 +97,9 @@ module.exports = async (req, res) => {
           id: b.id, subject: b.subject, tutorName: b.tutor_name, lessonType: b.lesson_type,
           startTime: b.start_time, feePence: b.fee_pence,
           paymentStatus: b.payment_status, billingBatchId: b.billing_batch_id,
+          // So the portal can label a charge the family would otherwise
+          // read as a mistake ("we cancelled that one").
+          deliveryStatus: b.delivery_status || null,
         })),
       });
     } catch (err) {
@@ -277,9 +288,21 @@ async function handleBillingCron(req, res) {
 // Checkout payment link for the batch total. Returns null if nothing is due.
 async function billStudentBatch(student, cycle, payments) {
   const nowIso = new Date().toISOString();
+  // SCRUM-88: bill only what actually happened. This used to select every
+  // unbilled booking with start_time <= now(), so a no-show, a lesson the
+  // tutor cancelled late, or one that simply never took place was charged
+  // to the family purely because its start time had passed — nothing
+  // anywhere asserted the lesson was delivered.
+  //
+  // The billable set is now explicit: 'delivered' (taught), 'no_show' and
+  // 'late_cancelled' (the tutor held the time and the family gave less than
+  // 18 hours' notice). A booking nobody has marked yet is null and is never
+  // billed, and 'waived' is never billed. status=neq.cancelled is dropped
+  // deliberately — a late cancellation IS chargeable, and it carries
+  // status='cancelled' with delivery_status='late_cancelled'.
   const bookings = await dbGet(
     `/bookings?student_id=eq.${student.id}&payment_status=eq.unbilled&fee_pence=gt.0` +
-    `&status=neq.cancelled&start_time=lte.${nowIso}&order=start_time.asc`
+    `&delivery_status=in.(delivered,no_show,late_cancelled)&order=start_time.asc`
   );
   if (!bookings.length) return { status: 'nothing_due' };
 

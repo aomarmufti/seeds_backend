@@ -88,6 +88,9 @@ test('periodic billing lifecycle: cron batches + emails a link, Stripe webhook s
     id: 'booking-1', student_id: 'student-1', tutor_name: 'Azeem Omar-Mufti',
     fee_pence: 4000, payment_status: 'unbilled', status: 'confirmed',
     start_time: '2026-01-05T10:00:00Z', end_time: '2026-01-05T10:55:00Z',
+    // SCRUM-88: the tutor has attested this lesson happened. Without this
+    // the booking is not billable at all — see the companion test below.
+    delivery_status: 'delivered', delivered_at: '2026-01-05T10:55:00Z',
   });
 
   let checkoutSessionId = null;
@@ -154,11 +157,90 @@ test('periodic billing lifecycle: cron batches + emails a link, Stripe webhook s
   assert.equal(batch.stripe_payment_intent_id, 'pi_lifecycle_1');
   assert.equal(fakeDb.tables.bookings[0].payment_status, 'paid', 'webhook settlement must flip the booking to paid');
 
-  // Finally: the booking is now paid AND its lesson (end_time) is in the
-  // past relative to "now" — this is exactly the pair of conditions
-  // payouts.js requires before a tutor can be paid out for it.
+  // Finally: the booking is paid, somebody attested the lesson happened, and
+  // it hasn't been paid out yet — exactly the three conditions payouts.js
+  // requires before a tutor can be paid for it. (end_time in the past used to
+  // stand in for the attestation; SCRUM-88 replaced that proxy.)
   const booking = fakeDb.tables.bookings[0];
-  const nowReal = new Date();
   assert.equal(booking.payment_status, 'paid');
-  assert.ok(new Date(booking.end_time) < nowReal, 'fixture lesson must actually be in the past for this assertion to mean anything');
+  assert.equal(booking.delivery_status, 'delivered');
+  assert.ok(!booking.paid_out_at, 'booking must not already be marked paid out');
+});
+
+test('SCRUM-88: an unattested lesson is never billed, however long ago it finished', async (t) => {
+  const fakeDb = makeFakeDb();
+  fakeDb.tables.students.push({
+    id: 'student-1', parent_email: 'parent@example.com', parent_name: 'Parent',
+    billing_cycle: 'weekly', stripe_customer_id: null,
+  });
+  // Same shape as the lifecycle fixture above, minus the attestation: the
+  // lesson's slot has long since passed, but nobody has said whether it
+  // actually happened. This is the SCRUM-88 bug — the old sweep selected on
+  // start_time <= now() and billed the family for it regardless.
+  fakeDb.tables.bookings.push({
+    id: 'booking-unattested', student_id: 'student-1', tutor_name: 'Azeem Omar-Mufti',
+    fee_pence: 4000, payment_status: 'unbilled', status: 'confirmed',
+    start_time: '2026-01-05T10:00:00Z', end_time: '2026-01-05T10:55:00Z',
+    delivery_status: null,
+  });
+
+  for (const k of Object.keys(require.cache)) delete require.cache[k];
+  mockModule('lib/cors.js', { applyCors: () => false });
+  mockPackage('nodemailer', { createTransport: () => ({ sendMail: async () => ({}) }) });
+  let checkoutCreated = false;
+  mockModule('lib/payments/index.js', {
+    getPaymentService: () => ({
+      createCheckoutSession: async () => { checkoutCreated = true; return { id: 'cs_x', url: 'https://x' }; },
+    }),
+  });
+  mockModule('lib/db.js', { dbGet: fakeDb.dbGet, dbPost: fakeDb.dbPost, dbPatch: fakeDb.dbPatch, supabaseRequest: fakeDb.supabaseRequest });
+
+  process.env.CRON_SECRET = 'shh';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-03T06:00:00Z') });
+  const billingHandler = require(path.join(backendRoot, 'api/billing.js'));
+  const cronRes = { status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await billingHandler({ method: 'GET', query: { resource: 'billing-cron' }, headers: { authorization: 'Bearer shh' } }, cronRes);
+
+  assert.equal(cronRes.statusCode, 200);
+  assert.equal(cronRes.body.results[0].status, 'nothing_due', 'unattested lesson must not be billable');
+  assert.equal(fakeDb.tables.billing_batches.length, 0, 'no batch may be created for an unattested lesson');
+  assert.equal(checkoutCreated, false, 'no payment link may be sent for an unattested lesson');
+  assert.equal(fakeDb.tables.bookings[0].payment_status, 'unbilled', 'booking must stay unbilled');
+});
+
+test('SCRUM-88: a late cancellation is billed even though its status is cancelled', async (t) => {
+  const fakeDb = makeFakeDb();
+  fakeDb.tables.students.push({
+    id: 'student-1', parent_email: 'parent@example.com', parent_name: 'Parent',
+    billing_cycle: 'weekly', stripe_customer_id: null,
+  });
+  // The family cancelled inside the 18-hour window, so the tutor held a slot
+  // they could no longer fill. status='cancelled' would have excluded this
+  // from the old sweep (status=neq.cancelled); delivery_status is what makes
+  // it chargeable now.
+  fakeDb.tables.bookings.push({
+    id: 'booking-late-cancel', student_id: 'student-1', tutor_name: 'Azeem Omar-Mufti',
+    fee_pence: 4000, payment_status: 'unbilled', status: 'cancelled',
+    start_time: '2026-01-05T10:00:00Z', end_time: '2026-01-05T10:55:00Z',
+    delivery_status: 'late_cancelled',
+  });
+
+  for (const k of Object.keys(require.cache)) delete require.cache[k];
+  mockModule('lib/cors.js', { applyCors: () => false });
+  mockPackage('nodemailer', { createTransport: () => ({ sendMail: async () => ({}) }) });
+  mockModule('lib/payments/index.js', {
+    getPaymentService: () => ({
+      createCheckoutSession: async () => ({ id: 'cs_late', url: 'https://checkout.stripe.com/cs_late' }),
+    }),
+  });
+  mockModule('lib/db.js', { dbGet: fakeDb.dbGet, dbPost: fakeDb.dbPost, dbPatch: fakeDb.dbPatch, supabaseRequest: fakeDb.supabaseRequest });
+
+  process.env.CRON_SECRET = 'shh';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-03T06:00:00Z') });
+  const billingHandler = require(path.join(backendRoot, 'api/billing.js'));
+  const cronRes = { status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await billingHandler({ method: 'GET', query: { resource: 'billing-cron' }, headers: { authorization: 'Bearer shh' } }, cronRes);
+
+  assert.equal(cronRes.body.results[0].status, 'payment_link_sent');
+  assert.equal(fakeDb.tables.billing_batches[0].total_pence, 4000, 'late cancellation is charged in full');
 });

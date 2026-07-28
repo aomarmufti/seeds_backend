@@ -213,14 +213,16 @@ module.exports = async (req, res) => {
         // Only pay a tutor out for a lesson once (a) the STUDENT has
         // actually paid for it (payment_status='paid') — under periodic
         // billing, a booking is confirmed the moment it's made regardless
-        // of whether it's been charged yet — AND (b) the lesson has
-        // actually happened (end_time in the past). A family paying their
-        // billing cycle in advance of a lesson that hasn't run yet must
-        // never translate into paying the tutor out for it early; "you get
-        // paid for what you complete" applies to both sides of this
-        // marketplace, not just the family's side.
+        // of whether it's been charged yet — AND (b) somebody attested to
+        // what actually happened. delivery_status replaces the old
+        // end_time<=now() proxy, which only ever meant "the slot has
+        // passed", not "the lesson ran". A family paying their billing
+        // cycle in advance of a lesson that hasn't run yet must never
+        // translate into paying the tutor out for it early; "you get paid
+        // for what you complete" applies to both sides of this marketplace,
+        // not just the family's side.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${nowIso}`
+          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&delivery_status=in.(delivered,no_show,late_cancelled)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`
         );
         if (!bookings.length) { results.push({ tutor: acct.tutor_name, status: 'nothing_due' }); continue; }
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
@@ -232,9 +234,15 @@ module.exports = async (req, res) => {
             destination: acct.stripe_account_id,
             description: `Seeds weekly payout — ${acct.tutor_name} — ${payoutWeek}`,
           }, { idempotencyKey: `auto-payout:${acct.tutor_name}:${payoutWeek}` });
+          // Mark exactly the bookings this transfer paid for, by id. The old
+          // code re-ran the selection query here, so any booking that became
+          // eligible between the SELECT and this PATCH — a lesson marked
+          // delivered seconds earlier, a payment landing mid-run — was
+          // flagged paid out while contributing nothing to the transfer
+          // amount, and would never be paid.
           await supabaseRequest(
-            `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&status=eq.confirmed&payment_status=eq.paid&fee_pence=gt.0&end_time=lte.${nowIso}`,
-            { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'completed' }) }
+            `/bookings?id=in.(${bookings.map(b => b.id).join(',')})`,
+            { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ paid_out_at: new Date().toISOString() }) }
           );
           await dbPost('/payouts', {
             tutor_name: acct.tutor_name, amount_pence: amount,
@@ -287,8 +295,15 @@ module.exports = async (req, res) => {
     }
     try {
       const meetingLink = await getMeetingLink(b.tutorName);
-      const feeMap = { gcse: 4000, alevel: 4500, group: 2000, trial: 0 };
       const lessonType = b.lessonType || 'gcse';
+      // Priced from lib/pricing.js, the single source of truth. This used to
+      // be a local `feeMap` of gcse/alevel/group/trial with a `?? 4000`
+      // fallback and no 'consultation' key at all — so a free 15-minute
+      // consultation was silently charged £40, and because the pending-
+      // confirmation flow keys off fee === 0, a student's consultation
+      // request never landed as 'requested' either. The map also forced
+      // every lesson to 55 minutes regardless of type.
+      const price = resolvePrice(lessonType, b.studentLevel);
       const created = [];
       const weeks = b.recurringWeeks && b.recurringWeeks > 1 ? b.recurringWeeks : 1;
       const start = new Date(b.startTime);
@@ -313,14 +328,14 @@ module.exports = async (req, res) => {
           created.push({ skipped: true, startTime: slotStart.toISOString(), reason: 'conflict' });
           continue;
         }
-        const fee = feeMap[lessonType] ?? 4000;
+        const fee = price.amount;
         const booking = await dbPost('/bookings', {
           student_id: studentId,
           tutor_name: b.tutorName,
           subject: b.subject || null,
           lesson_type: lessonType,
           start_time: slotStart.toISOString(),
-          duration_mins: b.durationMins || 55,
+          duration_mins: b.durationMins || price.duration,
           fee_pence: fee,
           // Booking a lesson no longer gates on payment at all — payment
           // is billed periodically per the family's own billing_cycle for
@@ -659,8 +674,15 @@ module.exports = async (req, res) => {
       const [startY] = (taxYear||'').split('-');
       const startDate = startY ? `${startY}-04-06` : `${new Date().getFullYear()-1}-04-06`;
       const endDate = startY ? `${parseInt(startY)+1}-04-05` : `${new Date().getFullYear()}-04-05`;
+      // Earnings = lessons actually paid out to the tutor. This read
+      // status='completed' back when that flag was what the payout path
+      // set; paid_out_at is now the marker, and status='completed' means
+      // the lesson was taught — which is not the same set (an unpaid
+      // delivered lesson is taught but not yet earned). The window still
+      // keys off start_time, so the statement continues to report by when
+      // the work was done rather than when the transfer cleared.
       const bookings = await dbGet(
-        `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=eq.completed&fee_pence=gt.0` +
+        `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&paid_out_at=not.is.null&fee_pence=gt.0` +
         `&start_time=gte.${startDate}&start_time=lte.${endDate}&order=start_time.asc`
       );
       const totalFee = bookings.reduce((s,b) => s + b.fee_pence, 0);
@@ -723,7 +745,13 @@ module.exports = async (req, res) => {
       let cancelled = 0, refunded = 0, refundFailed = 0;
 
       for (const b of bookings) {
-        const patch = { status: 'cancelled' };
+        // SCRUM-88: a bulk-cancel is always Seeds' own doing — a tutor off
+        // sick, a snow day, an ops correction — so it is never chargeable to
+        // the families involved, whatever the notice. 'waived' settles each
+        // booking so none is left null for the billing sweep to find.
+        const patch = { status: 'cancelled', delivery_status: 'waived',
+                        delivery_marked_by: admin.email,
+                        delivery_note: `Bulk cancellation${reason ? ': ' + reason : ''} — not charged.` };
         try {
           const result = await refundBooking(b, { reason: 'requested_by_customer' });
           if (result.refunded) { refunded++; patch.payment_status = 'refunded'; }
@@ -800,6 +828,118 @@ module.exports = async (req, res) => {
     }
   }
 
+  // SCRUM-88. The single point where somebody states what actually happened
+  // in a lesson. Until this runs, delivery_status is null and the booking is
+  // invisible to both the billing sweep and the payout sweep — no attestation,
+  // no money moves in either direction.
+  if (resource === 'mark-delivered') {
+    if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { bookingId, outcome, note } = req.body || {};
+    if (!bookingId) return res.status(400).json({ error: 'bookingId required' });
+    if (!isValidId(bookingId)) return res.status(400).json({ error: 'Invalid bookingId' });
+
+    // 'late_cancelled' is deliberately not settable here — it is only ever
+    // written by the cancellation path, which is the one place that can
+    // measure notice against the lesson's start time. Letting it be posted
+    // directly would make "the family cancelled late" an assertion anyone
+    // could make after the fact rather than something the clock decided.
+    const OUTCOMES = ['delivered', 'no_show', 'waived'];
+    if (!OUTCOMES.includes(outcome)) {
+      return res.status(400).json({ error: `outcome must be one of: ${OUTCOMES.join(', ')}` });
+    }
+    if (note != null && (typeof note !== 'string' || note.length > 500)) {
+      return res.status(400).json({ error: 'note must be a string under 500 characters' });
+    }
+
+    try {
+      const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
+      const booking = bookings[0];
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+      const isAdmin = caller.role === 'admin';
+      if (!isAdmin && !(await verifyTutorIdentity(caller, booking.tutor_name))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (booking.status === 'requested') {
+        return res.status(409).json({ error: 'This lesson was never confirmed.' });
+      }
+      // A lesson can't be attested before it has finished. Without this the
+      // endpoint would just reintroduce the bug it exists to fix, one
+      // booking at a time — marking a future lesson delivered would make it
+      // billable ahead of actually happening.
+      if (new Date(booking.end_time) > new Date()) {
+        return res.status(409).json({ error: 'This lesson hasn\'t finished yet.' });
+      }
+      // Attestation is a one-time statement of fact by the tutor. Correcting
+      // one is an admin job, because by then it may already have moved money.
+      if (booking.delivery_status && !isAdmin) {
+        return res.status(409).json({
+          error: `Already marked "${booking.delivery_status}". Ask an admin to change it.`,
+        });
+      }
+      // Once a booking has been paid out, its outcome is settled history —
+      // re-marking it would desynchronise the tutor's earnings from what
+      // they were actually transferred.
+      if (booking.paid_out_at) {
+        return res.status(409).json({ error: 'This lesson has already been paid out and can\'t be re-marked.' });
+      }
+
+      const patch = {
+        delivery_status: outcome,
+        delivery_marked_by: caller.email,
+        delivered_at: outcome === 'waived' ? null : new Date().toISOString(),
+      };
+      if (note != null) patch.delivery_note = note;
+      // status now says what happened to the lesson rather than doubling as
+      // the payout marker (see the paid_out_at migration). A no-show still
+      // concluded — the slot was held and consumed — so both it and a
+      // delivered lesson land on 'completed'; a waived lesson is left in
+      // whatever state it was in.
+      if (outcome === 'delivered' || outcome === 'no_show') patch.status = 'completed';
+
+      const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
+        method: 'PATCH', prefer: 'return=representation', body: JSON.stringify(patch),
+      });
+      const updated = await r.json();
+      if (!r.ok) throw new Error(JSON.stringify(updated));
+
+      await logAdminAction({
+        actor: caller.email, action: 'mark-delivered',
+        targetType: 'booking', targetId: bookingId,
+        details: { outcome, note: note || null, wasAdminOverride: isAdmin && !!booking.delivery_status },
+      });
+      return res.status(200).json({ success: true, booking: updated[0] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // The tutor's "what do I still owe an answer on" queue, and the admin's
+  // view of what is holding up billing.
+  if (resource === 'awaiting-delivery') {
+    const caller = await requireAuth(req, res);
+    if (!caller) return;
+    const { tutorName } = req.query;
+    const isAdmin = caller.role === 'admin';
+    if (!isAdmin) {
+      if (!tutorName || !(await verifyTutorIdentity(caller, tutorName))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+    try {
+      const scope = tutorName ? `tutor_name=eq.${encodeURIComponent(tutorName)}&` : '';
+      const bookings = await dbGet(
+        `/bookings?${scope}delivery_status=is.null&status=neq.requested` +
+        `&end_time=lte.${new Date().toISOString()}&order=start_time.asc`
+      );
+      return res.status(200).json({ bookings });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
   if (resource === 'self-cancel-booking') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
     const caller = await requireAuth(req, res);
@@ -825,7 +965,14 @@ module.exports = async (req, res) => {
         console.warn('Self-cancel refund failed:', refundErr.message);
         refundError = refundErr.message;
       }
-      const patch = { status: 'cancelled' };
+      // SCRUM-88: the tutor is withdrawing from their own lesson, so the
+      // 18-hour notice rule never applies — it exists to protect the tutor's
+      // held time, not to charge a family for a lesson the tutor pulled out
+      // of. Marked 'waived' rather than left null so the booking is settled
+      // and the billing sweep has nothing to reconsider.
+      const patch = { status: 'cancelled', delivery_status: 'waived',
+                      delivery_marked_by: caller.email,
+                      delivery_note: 'Cancelled by tutor — not charged to the family.' };
       if (refundResult.refunded) patch.payment_status = 'refunded';
       await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
         method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch),
