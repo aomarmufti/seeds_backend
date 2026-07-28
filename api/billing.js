@@ -68,14 +68,27 @@ module.exports = async (req, res) => {
         const students = await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&select=id`);
         studentIds = students.map(s => s.id);
       }
-      if (!studentIds.length) return res.status(200).json({ batches: [] });
+      if (!studentIds.length) return res.status(200).json({ batches: [], lessons: [] });
       const batches = await dbGet(`/billing_batches?student_id=in.(${studentIds.join(',')})&order=created_at.desc`);
+      // Per-lesson breakdown (SCRUM-75) — batches alone tell a family "this
+      // week is paid" but not which specific lesson(s) that covered. Free
+      // consultations/trials are excluded (fee_pence=gt.0) since they're
+      // never billed and would just show as permanently "unbilled" noise.
+      const bookings = await dbGet(
+        `/bookings?student_id=in.(${studentIds.join(',')})&fee_pence=gt.0&status=neq.cancelled` +
+        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,payment_status,billing_batch_id&order=start_time.desc`
+      );
       return res.status(200).json({
         batches: batches.map(b => ({
           id: b.id, cycle: b.cycle,
           periodStart: b.period_start, periodEnd: b.period_end,
           totalPence: b.total_pence, status: b.status,
           paymentLink: b.payment_link, paidAt: b.paid_at,
+        })),
+        lessons: bookings.map(b => ({
+          id: b.id, subject: b.subject, tutorName: b.tutor_name, lessonType: b.lesson_type,
+          startTime: b.start_time, feePence: b.fee_pence,
+          paymentStatus: b.payment_status, billingBatchId: b.billing_batch_id,
         })),
       });
     } catch (err) {
