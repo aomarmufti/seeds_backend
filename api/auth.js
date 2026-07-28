@@ -162,6 +162,43 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
+  // ── TUTOR SCHEDULING LINKS (SCRUM-74) ────────────────────
+  // Each tutor's own Cal.com account (unlimited free event types, replacing
+  // the single shared Calendly account whose free-plan limit broke every
+  // tutor's booking at once) has three public booking links stored on the
+  // canonical tutors table, keyed by name — no profiles/userId involved,
+  // unlike edit-tutor above, since this doesn't touch login/account fields.
+  if (action === 'get-tutor-links') {
+    const { tutorName } = req.body;
+    if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+    try {
+      const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=cal_lesson_link,cal_consultation_link,cal_trial_link&limit=1`);
+      if (!rows.length) return res.status(404).json({ error: 'Unknown tutor' });
+      return res.status(200).json({
+        calLessonLink: rows[0].cal_lesson_link || '',
+        calConsultationLink: rows[0].cal_consultation_link || '',
+        calTrialLink: rows[0].cal_trial_link || '',
+      });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  if (action === 'edit-tutor-links') {
+    const { tutorName, calLessonLink, calConsultationLink, calTrialLink } = req.body;
+    if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
+    try {
+      const updates = {};
+      if (calLessonLink !== undefined) updates.cal_lesson_link = calLessonLink || null;
+      if (calConsultationLink !== undefined) updates.cal_consultation_link = calConsultationLink || null;
+      if (calTrialLink !== undefined) updates.cal_trial_link = calTrialLink || null;
+      if (!Object.keys(updates).length) return res.status(400).json({ error: 'No links provided' });
+      const r = await supabaseRequest(`/tutors?name=eq.${encodeURIComponent(tutorName)}`, {
+        method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(updates),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
   // ── DEACTIVATE TUTOR ─────────────────
   if (action === 'deactivate-tutor') {
     const { userId } = req.body;

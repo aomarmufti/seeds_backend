@@ -98,6 +98,78 @@ test('edit-tutor sets tutor_name directly on profiles when the tutor has none ye
   assert.deepEqual(JSON.parse(relevant[0].body), { tutor_name: 'Brand New Tutor' });
 });
 
+// SCRUM-74: admin UI for each tutor's Cal.com scheduling links, keyed by
+// tutor name (not userId) since these live on the tutors table alone.
+test('get-tutor-links returns the tutor\'s three Cal.com links', async () => {
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (p) => {
+        assert.match(p, /^\/tutors\?name=eq\.Suleiman/);
+        return [{ cal_lesson_link: 'https://cal.eu/suleiman/lesson', cal_consultation_link: null, cal_trial_link: '' }];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'get-tutor-links', tutorName: 'Suleiman' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    calLessonLink: 'https://cal.eu/suleiman/lesson',
+    calConsultationLink: '',
+    calTrialLink: '',
+  });
+});
+
+test('get-tutor-links 404s for an unknown tutor', async () => {
+  const handler = loadWithMocks('api/auth.js', { db: { dbGet: async () => [] } });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'get-tutor-links', tutorName: 'Nobody' } }, res);
+  assert.equal(res.statusCode, 404);
+});
+
+test('get-tutor-links requires tutorName', async () => {
+  const handler = loadWithMocks('api/auth.js');
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'get-tutor-links' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('edit-tutor-links patches only the provided links on the tutors table', async () => {
+  const dbCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: { supabaseRequest: async (path, opts) => { dbCalls.push({ path, body: opts?.body }); return { ok: true, json: async () => ({}) }; } },
+  });
+  const res = makeRes();
+  await handler({
+    method: 'POST',
+    body: { action: 'edit-tutor-links', tutorName: 'Abdul-Moez', calLessonLink: 'https://cal.eu/abdul-moez/lesson', calTrialLink: '' },
+  }, res);
+  assert.equal(res.statusCode, 200);
+  const relevant = dbCalls.filter(c => c.path !== '/admin_audit_log');
+  assert.equal(relevant.length, 1);
+  assert.equal(relevant[0].path, '/tutors?name=eq.Abdul-Moez');
+  // An explicitly cleared field (empty string from the form) writes null,
+  // not left untouched — distinguished from a field never sent at all
+  // (calConsultationLink here, correctly absent from the patch body).
+  assert.deepEqual(JSON.parse(relevant[0].body), {
+    cal_lesson_link: 'https://cal.eu/abdul-moez/lesson',
+    cal_trial_link: null,
+  });
+});
+
+test('edit-tutor-links requires tutorName', async () => {
+  const handler = loadWithMocks('api/auth.js');
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'edit-tutor-links', calLessonLink: 'x' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('edit-tutor-links requires at least one link field', async () => {
+  const handler = loadWithMocks('api/auth.js');
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'edit-tutor-links', tutorName: 'Suleiman' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
 test('deactivate-tutor bans via the admin API and patches profiles with plain paths', async () => {
   const adminCalls = [];
   const dbCalls = [];
