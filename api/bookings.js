@@ -9,7 +9,6 @@ const { generateICS } = require('../lib/calendar');
 const { dbPost, dbGet, dbPatch } = require('../lib/db');
 const { requireCronSecret } = require('../lib/cronAuth');
 const { getMeetingLink } = require('../lib/tutors');
-const { createSchedulingLink, getScheduledEvent } = require('../lib/calendly');
 const { rateLimitOrReject } = require('../lib/rateLimit');
 const { normalizeEmail } = require('../lib/validate');
 
@@ -18,75 +17,48 @@ module.exports = async (req, res) => {
 
   const action = req.query.action;
 
-  // ── CALENDLY: get a fresh single-use scheduling link for a tutor ──────────
-  // Used by the public booking wizard to embed real availability instead of
-  // a fake static calendar (SCRUM-52 follow-up).
+  // ── CAL.COM: get the right tutor's real-availability booking link ────────
+  // Used by the public booking wizard, the student portal's in-portal
+  // booking modal, and the tutor portal's own booking flow to embed real
+  // availability instead of a fake static calendar (SCRUM-52 follow-up).
   //
   // Reads from the canonical `tutors` table (SCRUM-28) rather than `profiles`
   // — a tutor only gets a `profiles` row once they've signed up for a login,
   // but `tutors` is keyed by name alone and always exists, so this works even
   // for tutors who don't have (or don't need) a portal account yet.
-  if (action === 'calendly-link') {
-    const { tutorName } = req.query;
+  //
+  // Each tutor has their own individual Cal.com account (unlimited free
+  // event types) rather than the one shared account Calendly's free plan
+  // forced everyone onto — so, unlike the old calendly-link action, which
+  // ignored lessonType/context for that same reason, this genuinely
+  // picks the right link per booking context: cal_consultation_link (free
+  // 15-min Initial Consultation), cal_trial_link (free trial lesson), or
+  // cal_lesson_link (any paid lesson type). Each context's actual
+  // duration/price still comes from resolvePrice() and is stored on the
+  // booking row independently of whatever slot length Cal.com's own
+  // calendar shows.
+  if (action === 'scheduling-link') {
+    const { tutorName, lessonType, context } = req.query;
     if (!tutorName) return res.status(400).json({ error: 'tutorName required' });
-    // SCRUM-67: the connected Calendly account is on the free "Basic" plan,
-    // which only allows ONE active event type across the whole account —
-    // having separate consultation/trial-lesson/regular-lesson event types
-    // (the previous design) meant activating any one silently deactivated
-    // the others. Consolidated to a single shared `calendly_event_type_uri`
-    // for every booking context; lessonType/context no longer affect which
-    // Calendly link is used. Each context's actual duration/price still
-    // comes from resolvePrice() and is stored on the booking row
-    // independently of whatever slot length Calendly's own calendar shows —
-    // deliberately the longer "Lesson" event type, so a short consultation
-    // over-blocks the tutor's real calendar rather than under-blocking it.
+    const linkColumn = context === 'consultation' ? 'cal_consultation_link'
+      : lessonType === 'trial' ? 'cal_trial_link'
+      : 'cal_lesson_link';
     try {
-      let eventTypeUri;
+      let url;
       if (tutorName === 'Best available match') {
         // No specific tutor chosen yet — any tutor with real-time scheduling
         // configured will do, matching how getMeetingLink/the conflict-check
         // already treat this value as "not a real tutor name".
-        const rows = await dbGet(`/tutors?calendly_event_type_uri=not.is.null&select=calendly_event_type_uri&limit=1`);
-        eventTypeUri = rows[0]?.calendly_event_type_uri;
+        const rows = await dbGet(`/tutors?${linkColumn}=not.is.null&select=${linkColumn}&limit=1`);
+        url = rows[0]?.[linkColumn];
       } else {
-        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=calendly_event_type_uri&limit=1`);
-        eventTypeUri = rows[0]?.calendly_event_type_uri;
+        const rows = await dbGet(`/tutors?name=eq.${encodeURIComponent(tutorName)}&select=${linkColumn}&limit=1`);
+        url = rows[0]?.[linkColumn];
       }
-      if (!eventTypeUri) {
+      if (!url) {
         return res.status(404).json({ error: 'This tutor doesn\'t have real-time scheduling set up yet.' });
       }
-      // `eventTypeUri` is normally Calendly's internal API URI for an Event
-      // Type (https://api.calendly.com/event_types/...), which we can mint a
-      // fresh single-use link from. If instead it's just the tutor's plain
-      // public Calendly page (https://calendly.com/...) — simpler to obtain
-      // for a non-technical tutor, and all a widget embed actually needs —
-      // use it directly rather than requiring the API-only form.
-      const url = /^https:\/\/api\.calendly\.com\//.test(eventTypeUri)
-        ? await createSchedulingLink({ eventTypeUri })
-        : eventTypeUri;
       return res.status(200).json({ url });
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
-    }
-  }
-
-  // ── CALENDLY: resolve the real start/end time for a scheduled event ───────
-  // The embed's postMessage doesn't include the plain start time, only the
-  // event's API URI — this reads it back so the wizard can continue with a
-  // real, conflict-checked slot instead of the old fake day/time picker.
-  if (action === 'calendly-event') {
-    const { eventUri } = req.query;
-    if (!eventUri) return res.status(400).json({ error: 'eventUri required' });
-    // Only ever accept Calendly's own API host as a target — this value
-    // comes from a postMessage the embedded iframe sent us, and while
-    // Calendly controls that iframe's origin, we still shouldn't blindly
-    // forward an arbitrary caller-supplied URL to a server-side fetch.
-    if (!/^https:\/\/api\.calendly\.com\//.test(eventUri)) {
-      return res.status(400).json({ error: 'Invalid eventUri' });
-    }
-    try {
-      const event = await getScheduledEvent(eventUri);
-      return res.status(200).json(event);
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }
