@@ -28,23 +28,36 @@ module.exports = async (req, res) => {
         const booking = bookings[0];
         if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-        // Always a full refund of the booking's own fee — policy is to eat
-        // any Stripe processing fee rather than prorate, since billing only
-        // ever happens after the lesson (never in advance). Resolves the
-        // PaymentIntent whether the booking was charged directly (older
-        // ad-hoc-checkout path) or as part of a periodic billing_batches
-        // charge (SCRUM-56).
+        // SCRUM-88: who cancelled decides whether the family pays. The admin
+        // UI passes cancelledBy; it defaults to 'seeds' rather than 'family'
+        // so an unspecified admin cancellation stays free — an admin
+        // cancelling without saying why should never silently charge someone.
+        const { assessCancellation } = require('../lib/cancellationPolicy');
+        const { cancelledBy } = req.body || {};
+        const assessment = assessCancellation(booking, { cancelledBy: cancelledBy || 'seeds' });
+
+        // Refund only what we're not charging for. A late family cancellation
+        // is chargeable, so money already collected stays collected — that is
+        // the entire point of the notice window.
         let refundResult = { refunded: false };
         let refundError = null;
-        try {
-          refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
-        } catch(refundErr) {
-          // Log but don't block the cancellation
-          console.warn('Refund failed:', refundErr.message);
-          refundError = refundErr.message;
+        if (!assessment.chargeable) {
+          // Always a full refund of the booking's own fee — policy is to eat
+          // any Stripe processing fee rather than prorate. Resolves the
+          // PaymentIntent whether the booking was charged directly (older
+          // ad-hoc-checkout path) or as part of a periodic billing_batches
+          // charge (SCRUM-56).
+          try {
+            refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
+          } catch(refundErr) {
+            // Log but don't block the cancellation
+            console.warn('Refund failed:', refundErr.message);
+            refundError = refundErr.message;
+          }
         }
 
-        const patch = { status: 'cancelled' };
+        const patch = { status: 'cancelled', delivery_status: assessment.deliveryStatus,
+                        delivery_marked_by: admin.email, delivery_note: assessment.reason };
         if (refundResult.refunded) patch.payment_status = 'refunded';
         await dbPatch(`/bookings?id=eq.${bookingId}`, patch);
         return res.status(200).json({
@@ -52,6 +65,8 @@ module.exports = async (req, res) => {
           refundId: refundResult.refundId || null,
           refunded: refundResult.refunded,
           refundError,
+          chargeable: assessment.chargeable,
+          policyReason: assessment.reason,
         });
       } catch(e) { return res.status(500).json({ error: e.message }); }
     }

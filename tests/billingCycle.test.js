@@ -108,10 +108,14 @@ test('GET billing?resource=billing-history also returns a per-lesson breakdown',
       if (p.startsWith('/billing_batches?student_id=in.')) return [];
       if (p.startsWith('/bookings?student_id=in.')) {
         assert.ok(p.includes('fee_pence=gt.0'), 'excludes free consultations/trials');
-        assert.ok(p.includes('status=neq.cancelled'));
+        // SCRUM-88: cancelled lessons are excluded EXCEPT late cancellations,
+        // which are charged — a family must be able to see the lesson behind
+        // a charge they'd otherwise read as a billing error.
+        assert.ok(p.includes('or=(status.neq.cancelled,delivery_status.eq.late_cancelled)'));
         return [{
           id: 'b1', subject: 'Mathematics', tutor_name: 'Azeem Omar-Mufti', lesson_type: 'gcse',
           start_time: '2026-07-21T14:00:00Z', fee_pence: 4000, payment_status: 'paid', billing_batch_id: 'batch-1',
+          delivery_status: 'delivered',
         }];
       }
       return [];
@@ -124,7 +128,7 @@ test('GET billing?resource=billing-history also returns a per-lesson breakdown',
   assert.deepEqual(res.body.lessons[0], {
     id: 'b1', subject: 'Mathematics', tutorName: 'Azeem Omar-Mufti', lessonType: 'gcse',
     startTime: '2026-07-21T14:00:00Z', feePence: 4000,
-    paymentStatus: 'paid', billingBatchId: 'batch-1',
+    paymentStatus: 'paid', billingBatchId: 'batch-1', deliveryStatus: 'delivered',
   });
 });
 

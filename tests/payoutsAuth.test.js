@@ -153,7 +153,7 @@ test('POST payouts approve-and-transfer is unaffected — still admin-gated as b
 // yet — so marking a booking "tutor paid out" (status -> 'completed') must
 // also require payment_status='paid', or an admin could pay a tutor out of
 // money that was never actually collected from the family.
-test('POST payouts approve-and-transfer only completes bookings the student has actually paid for', async () => {
+test('POST payouts approve-and-transfer only pays out lessons that were paid for and attested', async () => {
   let queriedPath;
   const handler = loadWithMocks('api/payouts.js', {
     auth: { requireAdmin: async () => ({ id: 'admin-1', email: 'admin@example.com', role: 'admin' }) },
@@ -168,7 +168,15 @@ test('POST payouts approve-and-transfer only completes bookings the student has 
   const res = makeRes();
   await handler({ method: 'POST', body: { action: 'approve-and-transfer', tutorName: 'Azeem Omar-Mufti', amountPence: 10000 } }, res);
   assert.equal(res.statusCode, 200);
-  assert.ok(queriedPath.includes('status=eq.confirmed'));
-  assert.ok(queriedPath.includes('payment_status=eq.paid'), 'must not complete a booking the family has not paid for yet');
-  assert.ok(queriedPath.includes('end_time=lte.'), 'must not complete a booking for a lesson that hasn\'t happened yet');
+  assert.ok(queriedPath.includes('payment_status=eq.paid'), 'must not pay out a booking the family has not paid for yet');
+  // SCRUM-88: attestation, not a passed end_time, is what makes a lesson
+  // payable — a slot whose time has come and gone is not evidence anyone
+  // taught anything.
+  assert.ok(
+    queriedPath.includes('delivery_status=in.(delivered,no_show,late_cancelled)'),
+    'must only pay out lessons whose outcome someone actually confirmed'
+  );
+  assert.ok(!queriedPath.includes('end_time=lte.'), 'end_time must no longer stand in for attestation');
+  // paid_out_at is the marker now, so re-running a payout can't pay twice.
+  assert.ok(queriedPath.includes('paid_out_at=is.null'), 'must skip bookings already paid out');
 });
