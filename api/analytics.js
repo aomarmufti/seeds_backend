@@ -131,6 +131,66 @@ module.exports = async (req, res) => {
     }
   }
 
+  // SCRUM-86: the authoritative admin roster — every real account on the
+  // platform, keyed off profiles rather than the students/tutors tables.
+  // Admin's Students page used to render straight from `students`, which is
+  // only populated by an actual booking, so an approved-but-never-booked
+  // account was invisible (SCRUM-85); the Tutors page rendered from a
+  // hardcoded array of three names, so every tutor created since was
+  // invisible too (SCRUM-84). Both now read this instead.
+  if (req.query.resource === 'accounts') {
+    if (!(await requireAdmin(req, res))) return;
+    try {
+      const [profiles, students, tutors] = await Promise.all([
+        dbGet('/profiles?select=id,email,full_name,role,tutor_name,assigned_tutor,subject,level,created_at&order=created_at.desc'),
+        dbGet('/students?select=id,parent_email,parent_name,student_name,bookings(id,status)'),
+        dbGet('/tutors?select=name,email,subjects'),
+      ]);
+      const studentByEmail = new Map(
+        students.map(s => [(s.parent_email || '').toLowerCase(), s])
+      );
+      const tutorByName = new Map(tutors.map(t => [t.name, t]));
+      const accounts = profiles
+        .filter(p => ['student', 'tutor', 'pending', 'deactivated'].includes(p.role))
+        .map(p => {
+          const student = studentByEmail.get((p.email || '').toLowerCase());
+          const tutor = p.tutor_name ? tutorByName.get(p.tutor_name) : null;
+          return {
+            id: p.id,
+            email: p.email,
+            fullName: p.full_name,
+            role: p.role,
+            createdAt: p.created_at,
+            // student-side
+            studentId: student?.id || null,
+            studentName: student?.student_name || p.full_name,
+            parentName: student?.parent_name || null,
+            assignedTutor: p.assigned_tutor || null,
+            subject: p.subject || null,
+            level: p.level || null,
+            lessonCount: (student?.bookings || []).filter(b => b.status !== 'cancelled').length,
+            // tutor-side
+            tutorName: p.tutor_name || null,
+            subjects: tutor?.subjects || null,
+          };
+        });
+      // Tutors that exist in the canonical table but have no login yet
+      // (seeded/legacy rows) still need to be visible and assignable.
+      const claimed = new Set(profiles.map(p => p.tutor_name).filter(Boolean));
+      const unclaimed = tutors
+        .filter(t => !claimed.has(t.name))
+        .map(t => ({
+          id: null, email: t.email || null, fullName: t.name, role: 'tutor',
+          createdAt: null, studentId: null, studentName: t.name, parentName: null,
+          assignedTutor: null, subject: null, level: null, lessonCount: 0,
+          tutorName: t.name, subjects: t.subjects || null, noLogin: true,
+        }));
+      return res.status(200).json([...accounts, ...unclaimed]);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   // Pending student signups (read via service key so profiles can be locked down)
   if (req.query.resource === 'pending-profiles') {
     if (!(await requireAdmin(req, res))) return;
