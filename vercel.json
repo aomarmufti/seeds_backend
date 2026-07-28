@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/lifecycle?resource=auto-payout",
-      "schedule": "0 0 * * 0"
+      "schedule": "0 5 * * *"
     },
     {
       "path": "/api/billing?resource=billing-cron",

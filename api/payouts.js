@@ -75,9 +75,9 @@ module.exports = async (req, res) => {
               }),
             });
           }
-          return res.status(200).json({ connected: true, onboardingComplete: complete, accountId: acct.stripe_account_id });
+          return res.status(200).json({ connected: true, onboardingComplete: complete, accountId: acct.stripe_account_id, payoutCycle: acct.payout_cycle || 'weekly' });
         }
-        return res.status(200).json({ connected: true, onboardingComplete: acct.onboarding_complete, accountId: acct.stripe_account_id });
+        return res.status(200).json({ connected: true, onboardingComplete: acct.onboarding_complete, accountId: acct.stripe_account_id, payoutCycle: acct.payout_cycle || 'weekly' });
       } catch(e) {
         // If table doesn't exist yet, return not-connected rather than crashing
         if (e.message && (e.message.includes('tutor_accounts') || e.message.includes('schema cache') || e.message.includes('42P01'))) {
@@ -215,16 +215,28 @@ module.exports = async (req, res) => {
       }
     }
 
-    if (!tutorName || !body.amountPence || body.amountPence < 5000) {
-      return res.status(400).json({ error: 'Minimum payout £50' });
+    // SCRUM-76: payouts are automatic (weekly or monthly, whichever the
+    // admin sets per tutor — see api/lifecycle?resource=auto-payout), so
+    // there's no more tutor-facing "request a payout" action here. This is
+    // the admin control for which cycle a tutor is on.
+    if (action === 'set-payout-cycle') {
+      if (!tutorName || !['weekly', 'monthly'].includes(body.payoutCycle)) {
+        return res.status(400).json({ error: 'tutorName and a payoutCycle of weekly or monthly are required' });
+      }
+      const admin = await requireAdmin(req, res);
+      if (!admin) return;
+      try {
+        const r = await supabaseRequest('/tutor_accounts?on_conflict=tutor_name', {
+          method: 'POST',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: JSON.stringify({ tutor_name: tutorName, payout_cycle: body.payoutCycle }),
+        });
+        if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
     }
-    const caller = await requireAuth(req, res);
-    if (!caller) return;
-    if (!(await verifyTutorIdentity(caller, tutorName))) return res.status(403).json({ error: 'Forbidden' });
-    try {
-      const payout = await dbPost('/payouts', { tutor_name: tutorName, amount_pence: body.amountPence, status: 'requested' });
-      return res.status(201).json({ success: true, payout });
-    } catch(e) { return res.status(500).json({ error: e.message }); }
+
+    return res.status(400).json({ error: 'Unknown action' });
   }
 
   res.status(405).json({ error: 'Method not allowed' });

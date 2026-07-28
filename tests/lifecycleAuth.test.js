@@ -481,18 +481,21 @@ test('resource=charge-student marks the booking payment_status=paid on a success
 });
 
 // ── auto-payout ───────────────────────────────────────────────────────────
-// Weekly cron that pays tutors 78% of what's owed for confirmed, fee-bearing
-// bookings. Under periodic billing a booking's own status is 'confirmed'
-// the moment it's made regardless of whether the family has been charged
-// yet, so this must also require payment_status='paid' or it would pay
-// tutors out of money never actually collected.
-test('resource=auto-payout only pays tutors for bookings the student has actually paid for', async () => {
+// Daily cron (SCRUM-76) that pays each tutor 78% of what's owed on whichever
+// cadence the admin set for them (tutor_accounts.payout_cycle), the same
+// weekly-Sunday/monthly-1st split api/billing.js's billing-cron already uses
+// for student billing. Under periodic billing a booking's own status is
+// 'confirmed' the moment it's made regardless of whether the family has been
+// charged yet, so this must also require payment_status='paid' or it would
+// pay tutors out of money never actually collected.
+test('resource=auto-payout only pays tutors for bookings the student has actually paid for', async (t) => {
   process.env.CRON_SECRET = 'shh';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T05:00:00Z') }); // Sunday
   const queriedPaths = [];
   const handler = loadWithMocks('api/lifecycle.js', {
     db: {
       dbGet: async (p) => {
-        if (p.startsWith('/tutor_accounts')) return [{ tutor_name: 'Azeem Omar-Mufti', onboarding_complete: true, stripe_account_id: 'acct_1' }];
+        if (p.startsWith('/tutor_accounts')) return [{ tutor_name: 'Azeem Omar-Mufti', onboarding_complete: true, stripe_account_id: 'acct_1', payout_cycle: 'weekly' }];
         if (p.startsWith('/bookings?')) { queriedPaths.push(p); return []; }
         return [];
       },
@@ -513,6 +516,38 @@ test('resource=auto-payout only pays tutors for bookings the student has actuall
     assert.ok(p.includes('payment_status=eq.paid'), 'must not pay a tutor for an unbilled or declined lesson');
     assert.ok(p.includes('end_time=lte.'), 'must not pay a tutor for a lesson that hasn\'t happened yet');
   });
+});
+
+test('resource=auto-payout is a no-op on a day that is neither a Sunday nor the 1st of the month', async (t) => {
+  process.env.CRON_SECRET = 'shh';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-05T05:00:00Z') }); // Wednesday the 5th
+  const handler = loadWithMocks('api/lifecycle.js');
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'auto-payout' }, headers: { authorization: 'Bearer shh' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.processed, 0);
+});
+
+// SCRUM-76: a monthly-cycle tutor must not be paid on a plain Sunday, only
+// on the 1st — and a weekly-cycle tutor must not be paid on the 1st unless
+// it also happens to be a Sunday. Each cadence only fires on its own day.
+test('resource=auto-payout only pays a monthly-cycle tutor on the 1st, not on a regular Sunday', async (t) => {
+  process.env.CRON_SECRET = 'shh';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-02T05:00:00Z') }); // Sunday, not the 1st
+  const queriedPaths = [];
+  const handler = loadWithMocks('api/lifecycle.js', {
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/tutor_accounts')) return [{ tutor_name: 'Suleiman', onboarding_complete: true, stripe_account_id: 'acct_2', payout_cycle: 'monthly' }];
+        if (p.startsWith('/bookings?')) { queriedPaths.push(p); return []; }
+        return [];
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'auto-payout' }, headers: { authorization: 'Bearer shh' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(queriedPaths.length, 0, 'a monthly-cycle tutor must not be processed on a plain Sunday');
 });
 
 // ── progress-history ─────────────────────────────────────────────────────
