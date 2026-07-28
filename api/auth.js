@@ -45,11 +45,28 @@ module.exports = async (req, res) => {
 
   // ── APPROVE STUDENT ────────────────────
   if (action === 'approve-student') {
-    const { userId, assignedTutor } = req.body;
+    // A pending signup (magic link / Google, see SCRUM-78) has no way to
+    // say whether the person is actually a family or a tutor — admin has
+    // to make that call. Defaults to 'student' (the original behaviour of
+    // this action) but now also accepts role:'tutor', which does the same
+    // profile + tutors-table setup as the separate create-tutor action
+    // above instead of assigning a tutor to them.
+    const { userId, assignedTutor, role, tutorName, subjects } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
+    const approvedRole = role === 'tutor' ? 'tutor' : 'student';
     try {
+      const updates = { role: approvedRole };
+      if (approvedRole === 'tutor') {
+        const profiles = await dbGet(`/profiles?id=eq.${userId}&select=email,full_name&limit=1`);
+        const profile = profiles[0];
+        const name = tutorName || profile?.full_name;
+        updates.tutor_name = name;
+        await registerTutor({ name, email: profile?.email, subjects: subjects || null });
+      } else {
+        updates.assigned_tutor = assignedTutor || null;
+      }
       const r = await supabaseRequest('/profiles?id=eq.' + userId,
-        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'student', assigned_tutor: assignedTutor||null }) }
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(updates) }
       );
       if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
       await supabaseAdminRequest('/auth/v1/admin/users/' + userId + '/recovery', { method: 'POST', body: JSON.stringify({}) });

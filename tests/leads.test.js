@@ -182,6 +182,36 @@ test('PATCH leads allows a tutor updating status/notes on their own assigned lea
   assert.equal(res.statusCode, 200);
 });
 
+test('PATCH leads assigning a tutor with a Cal.com link sends it and flags the lead so the tutor portal skips the manual propose-slots button', async () => {
+  const supabaseCalls = [];
+  let schedulingLinkSent = null;
+  const handler = loadWithMocks('api/leads.js', {
+    auth: { requireAuth: async () => ({ id: 'admin-1', role: 'admin', email: 'admin@example.com' }) },
+    reminders: {
+      sendTutorAssigned: async () => {},
+      sendSchedulingLink: async (args) => { schedulingLinkSent = args; },
+    },
+    db: {
+      dbGet: async (p) => {
+        if (p.startsWith('/profiles?tutor_name=eq.')) return [{ email: 'tutor@example.com' }];
+        if (p.startsWith('/tutors?name=eq.')) return [{ cal_consultation_link: 'https://cal.eu/azeem-mufti-h4oqbq/15min' }];
+        return [];
+      },
+      supabaseRequest: async (path, opts) => {
+        supabaseCalls.push({ path, body: opts && opts.body ? JSON.parse(opts.body) : null });
+        return { ok: true, json: async () => ([{ id: 'lead1', name: 'N', email: 'e@x.com' }]) };
+      },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'PATCH', body: { id: 'lead1', status: 'assigned', assignedTutor: 'Azeem Omar-Mufti' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(schedulingLinkSent, 'sendSchedulingLink should have been called');
+  assert.equal(schedulingLinkSent.tutorName, 'Azeem Omar-Mufti');
+  const notesPatch = supabaseCalls.find(c => c.body && c.body.notes);
+  assert.deepEqual(JSON.parse(notesPatch.body.notes), { calLinkSent: true });
+});
+
 function createLeadReq(overrides = {}) {
   return {
     method: 'POST',

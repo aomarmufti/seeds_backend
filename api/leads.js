@@ -249,6 +249,16 @@ module.exports = async (req, res) => {
                 parentName: lead.name, parentEmail: lead.email,
                 tutorName: updates.assigned_tutor, subject: lead.subject, schedulingUrl: url,
               });
+              // Record that the family already got a real-time Cal.com link,
+              // so the tutor portal doesn't also invite the tutor to use the
+              // manual propose-slots flow below on the same lead — those two
+              // paths used to run side by side with nothing to tell a tutor
+              // who already has Cal.com set up that manually proposing times
+              // was redundant (and could send the family conflicting asks).
+              await supabaseRequest(`/leads?id=eq.${lead.id}`, {
+                method: 'PATCH', prefer: 'return=minimal',
+                body: JSON.stringify({ notes: JSON.stringify({ calLinkSent: true }) }),
+              });
             } catch(calErr) { console.warn('Cal.com scheduling link failed:', calErr.message); }
           }
         } catch(emailErr) { console.warn('Tutor assigned email failed:', emailErr.message); }

@@ -47,6 +47,25 @@ test('approve-student patches the profiles table with a plain path', async () =>
   assert.deepEqual(dbCalls.filter(p => p !== '/admin_audit_log'), ['/profiles?id=eq.user-1']);
 });
 
+test('approve-student with role:tutor registers a tutor instead of assigning a student', async () => {
+  const dbCalls = [];
+  let registered = null;
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async () => [{ email: 'pending@example.com', full_name: 'Pending Person' }],
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, body: opts && JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+    tutors: { registerTutor: async (args) => { registered = args; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'approve-student', userId: 'user-1', role: 'tutor', tutorName: 'Pending Person', subjects: 'Physics' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(registered, { name: 'Pending Person', email: 'pending@example.com', subjects: 'Physics' });
+  const profilesPatch = dbCalls.find(c => c.path === '/profiles?id=eq.user-1');
+  assert.deepEqual(profilesPatch.body, { role: 'tutor', tutor_name: 'Pending Person' });
+});
+
 test('invite-tutor registers the tutor in the canonical tutors table', async () => {
   let registered = null;
   const handler = loadWithMocks('api/auth.js', {
