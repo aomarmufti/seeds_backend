@@ -45,4 +45,38 @@ test('parseBookingPayload handles a payload with no attendees or metadata', () =
   const parsed = parseBookingPayload({ uid: 'x', startTime: 's', endTime: 'e' });
   assert.equal(parsed.attendeeEmail, undefined);
   assert.equal(parsed.trackingId, undefined);
+  assert.equal(parsed.organizerEmail, undefined);
+  assert.equal(parsed.meetingLink, undefined);
+});
+
+// SCRUM-77: the real per-booking meeting link (e.g. Cal.com's own Google
+// Calendar/Meet integration) is genuinely different from this app's static
+// tutors.meet_link/MEET_LINK_* fallback — best-effort extraction, since the
+// exact field name hasn't been confirmed against a live webhook delivery.
+test('parseBookingPayload extracts the organizer email and a videoCallData meeting link', () => {
+  const parsed = parseBookingPayload({
+    uid: 'booking-uid-123', startTime: 's', endTime: 'e',
+    organizer: { email: 'tutor@example.com', name: 'Some Tutor' },
+    videoCallData: { url: 'https://meet.google.com/real-room', type: 'google_meet' },
+  });
+  assert.equal(parsed.organizerEmail, 'tutor@example.com');
+  assert.equal(parsed.meetingLink, 'https://meet.google.com/real-room');
+});
+
+test('parseBookingPayload falls back to metadata.videoCallUrl when there\'s no videoCallData', () => {
+  const parsed = parseBookingPayload({
+    uid: 'x', startTime: 's', endTime: 'e',
+    metadata: { videoCallUrl: 'https://meet.google.com/from-metadata' },
+  });
+  assert.equal(parsed.meetingLink, 'https://meet.google.com/from-metadata');
+});
+
+test('parseBookingPayload falls back to location when it looks like a URL', () => {
+  const parsed = parseBookingPayload({ uid: 'x', startTime: 's', endTime: 'e', location: 'https://meet.google.com/from-location' });
+  assert.equal(parsed.meetingLink, 'https://meet.google.com/from-location');
+});
+
+test('parseBookingPayload ignores a non-URL location (e.g. a physical address or integration id)', () => {
+  const parsed = parseBookingPayload({ uid: 'x', startTime: 's', endTime: 'e', location: 'integrations:daily' });
+  assert.equal(parsed.meetingLink, undefined);
 });

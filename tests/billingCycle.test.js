@@ -87,6 +87,7 @@ test('GET billing?resource=billing-history returns the caller\'s own billing bat
       if (p.startsWith('/billing_batches?student_id=in.')) {
         return [{ id: 'batch-1', cycle: 'weekly', period_start: '2026-07-01', period_end: '2026-07-08', total_pence: 8000, status: 'paid', payment_link: null, paid_at: '2026-07-08' }];
       }
+      if (p.startsWith('/bookings?student_id=in.')) return [];
       return [];
     },
   });
@@ -98,10 +99,40 @@ test('GET billing?resource=billing-history returns the caller\'s own billing bat
   assert.equal(res.body.batches[0].status, 'paid');
 });
 
+// SCRUM-75: batches alone can't tell a family which specific lesson a
+// weekly/monthly total covered — this is the per-lesson breakdown.
+test('GET billing?resource=billing-history also returns a per-lesson breakdown', async () => {
+  const handler = loadHandler({
+    dbGetMock: async (p) => {
+      if (p.startsWith('/students?parent_email=eq.')) return [{ id: 'student-1' }];
+      if (p.startsWith('/billing_batches?student_id=in.')) return [];
+      if (p.startsWith('/bookings?student_id=in.')) {
+        assert.ok(p.includes('fee_pence=gt.0'), 'excludes free consultations/trials');
+        assert.ok(p.includes('status=neq.cancelled'));
+        return [{
+          id: 'b1', subject: 'Mathematics', tutor_name: 'Azeem Omar-Mufti', lesson_type: 'gcse',
+          start_time: '2026-07-21T14:00:00Z', fee_pence: 4000, payment_status: 'paid', billing_batch_id: 'batch-1',
+        }];
+      }
+      return [];
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'billing-history' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.lessons.length, 1);
+  assert.deepEqual(res.body.lessons[0], {
+    id: 'b1', subject: 'Mathematics', tutorName: 'Azeem Omar-Mufti', lessonType: 'gcse',
+    startTime: '2026-07-21T14:00:00Z', feePence: 4000,
+    paymentStatus: 'paid', billingBatchId: 'batch-1',
+  });
+});
+
 test('GET billing?resource=billing-history returns an empty list for a family with no student record', async () => {
   const handler = loadHandler({ dbGetMock: async () => [] });
   const res = makeRes();
   await handler({ method: 'GET', query: { resource: 'billing-history' } }, res);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.batches, []);
+  assert.deepEqual(res.body.lessons, []);
 });

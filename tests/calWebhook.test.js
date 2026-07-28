@@ -111,11 +111,94 @@ test('BOOKING_CREATED always confirms a free Initial Consultation booking, defer
   assert.equal(confirmationSent, true);
 });
 
-test('BOOKING_CREATED with no tracking id is skipped gracefully (no crash)', async () => {
+// SCRUM-77: when Cal.com hands back a real per-booking meeting link, use it
+// instead of the static tutors.meet_link/MEET_LINK_* fallback — the family's
+// calendar invite and our own confirmation email must point at the same room.
+test('BOOKING_CREATED prefers the real Cal.com meeting link over the static fallback when present', async () => {
+  const posted = [];
+  const body = bookingCreatedBody({ videoCallData: { url: 'https://meet.google.com/real-room' } });
+  const raw = JSON.stringify(body);
+  const handler = loadHandler({
+    rawBody: raw,
+    dbGetMock: async (p) => {
+      if (p.startsWith('/leads?')) return [{ id: 'lead-1', name: 'Parent Name', email: 'parent@example.com', subject: 'Maths', level: 'gcse', assigned_tutor: 'Azeem Omar-Mufti' }];
+      if (p.startsWith('/students?')) return [{ id: 'student-1' }];
+      return [];
+    },
+    dbPostMock: async (p, b) => { posted.push({ p, b }); return { id: 'booking-1', ...b }; },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', headers: { 'x-cal-signature-256': sign(raw) } }, res);
+  assert.equal(res.statusCode, 200);
+  const bookingInsert = posted.find(p => p.p === '/bookings');
+  assert.equal(bookingInsert.b.meet_link, 'https://meet.google.com/real-room');
+});
+
+// SCRUM-77: a booking made through the public wizard/portal/tutor
+// "Add lesson" has no trackingId (it created its own row already) — this is
+// the reconciliation path that attaches the real Cal.com uid + meeting link
+// to that existing row, matched by tutor + exact start time.
+test('BOOKING_CREATED with no tracking id reconciles the matching existing booking by tutor + start time', async () => {
+  const patched = [];
+  const body = bookingCreatedBody({
+    organizer: { email: 'tutor@example.com' },
+    videoCallData: { url: 'https://meet.google.com/real-room' },
+  });
+  delete body.payload.metadata;
+  const raw = JSON.stringify(body);
+  const handler = loadHandler({
+    rawBody: raw,
+    dbGetMock: async (p) => {
+      if (p.startsWith('/tutors?email=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
+      if (p.startsWith('/bookings?tutor_name=')) return [{ id: 'booking-existing-1' }];
+      return [];
+    },
+    dbMock: async (p, opts) => {
+      if (p === '/cal_webhook_events') return { ok: true, json: async () => ({}) };
+      patched.push({ p, b: JSON.parse(opts.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', headers: { 'x-cal-signature-256': sign(raw) } }, res);
+  assert.equal(res.statusCode, 200);
+  const bookingPatch = patched.find(p => p.p === '/bookings?id=eq.booking-existing-1');
+  assert.ok(bookingPatch, 'should patch the matching existing booking');
+  assert.equal(bookingPatch.b.cal_booking_uid, 'booking-uid-1');
+  assert.equal(bookingPatch.b.meet_link, 'https://meet.google.com/real-room');
+});
+
+test('BOOKING_CREATED with no tracking id and no organizer is skipped gracefully (no crash)', async () => {
   const body = bookingCreatedBody();
   delete body.payload.metadata;
   const raw = JSON.stringify(body);
   const handler = loadHandler({ rawBody: raw });
+  const res = makeRes();
+  await handler({ method: 'POST', headers: { 'x-cal-signature-256': sign(raw) } }, res);
+  assert.equal(res.statusCode, 200);
+});
+
+test('BOOKING_CREATED with no tracking id and no matching tutor is skipped gracefully (no crash)', async () => {
+  const body = bookingCreatedBody({ organizer: { email: 'unknown@example.com' } });
+  delete body.payload.metadata;
+  const raw = JSON.stringify(body);
+  const handler = loadHandler({ rawBody: raw, dbGetMock: async () => [] });
+  const res = makeRes();
+  await handler({ method: 'POST', headers: { 'x-cal-signature-256': sign(raw) } }, res);
+  assert.equal(res.statusCode, 200);
+});
+
+test('BOOKING_CREATED with no tracking id and no matching booking is skipped gracefully (no crash)', async () => {
+  const body = bookingCreatedBody({ organizer: { email: 'tutor@example.com' } });
+  delete body.payload.metadata;
+  const raw = JSON.stringify(body);
+  const handler = loadHandler({
+    rawBody: raw,
+    dbGetMock: async (p) => {
+      if (p.startsWith('/tutors?email=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
+      return [];
+    },
+  });
   const res = makeRes();
   await handler({ method: 'POST', headers: { 'x-cal-signature-256': sign(raw) } }, res);
   assert.equal(res.statusCode, 200);

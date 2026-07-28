@@ -189,13 +189,24 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // ── AUTO WEEKLY PAYOUT (Vercel cron every Sunday midnight) ──────────────
+  // ── AUTO PAYOUT (Vercel cron, daily) — SCRUM-76: each tutor's cadence is
+  // now admin-set (tutor_accounts.payout_cycle), same weekly-Sunday /
+  // monthly-1st split api/billing.js's billing-cron already uses for
+  // student billing, rather than paying every onboarded tutor weekly.
   if (resource === 'auto-payout') {
     if (!requireCronSecret(req, res)) return;
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
     try {
-      const accounts = await dbGet('/tutor_accounts?onboarding_complete=eq.true');
+      const today = new Date();
+      const cyclesDueToday = [];
+      if (today.getUTCDay() === 0) cyclesDueToday.push('weekly'); // every Sunday
+      if (today.getUTCDate() === 1) cyclesDueToday.push('monthly'); // 1st of month
+      if (!cyclesDueToday.length) {
+        return res.status(200).json({ success: true, processed: 0, note: 'Not a payout day for either cycle' });
+      }
+      const allAccounts = await dbGet('/tutor_accounts?onboarding_complete=eq.true');
+      const accounts = allAccounts.filter(a => cyclesDueToday.includes(a.payout_cycle || 'weekly'));
       const results = [];
       const nowIso = new Date().toISOString();
       for (const acct of accounts) {

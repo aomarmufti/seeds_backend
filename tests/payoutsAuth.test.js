@@ -89,27 +89,51 @@ test('POST payouts create-connect-account rejects a caller impersonating a diffe
   assert.equal(res.statusCode, 403);
 });
 
-test('POST payouts create payout request rejects a caller requesting for a different tutor', async () => {
+// SCRUM-76: self-serve "request a payout" was removed — payouts are now
+// automatic (weekly/monthly, admin-set per tutor). A POST with no
+// recognised action (the old request-payout shape) is just rejected.
+test('POST payouts with no action and no known resource is rejected', async () => {
   const handler = loadWithMocks('api/payouts.js', {
-    auth: { requireAuth: async () => otherTutorCaller },
-    db: dbFor('Someone Else'),
+    auth: { requireAuth: async () => tutorCaller },
+    db: dbFor('Azeem Omar-Mufti'),
   });
   const res = makeRes();
   await handler({ method: 'POST', body: { tutorName: 'Azeem Omar-Mufti', amountPence: 5000 } }, res);
-  assert.equal(res.statusCode, 403);
+  assert.equal(res.statusCode, 400);
 });
 
-test('POST payouts create payout request allows a tutor requesting their own payout', async () => {
+test('POST payouts set-payout-cycle requires admin', async () => {
   const handler = loadWithMocks('api/payouts.js', {
-    auth: { requireAuth: async () => tutorCaller },
+    auth: { requireAdmin: async (req, res) => { res.status(401).json({ error: 'Unauthorized' }); return null; } },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'set-payout-cycle', tutorName: 'Azeem Omar-Mufti', payoutCycle: 'monthly' } }, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('POST payouts set-payout-cycle rejects a cadence that isn\'t weekly or monthly', async () => {
+  const handler = loadWithMocks('api/payouts.js');
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'set-payout-cycle', tutorName: 'Azeem Omar-Mufti', payoutCycle: 'daily' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('POST payouts set-payout-cycle upserts the tutor\'s cycle by name', async () => {
+  let upserted = null;
+  const handler = loadWithMocks('api/payouts.js', {
     db: {
-      dbGet: async (p) => (p.startsWith('/profiles?id=eq.') ? [{ tutor_name: 'Azeem Omar-Mufti' }] : []),
-      dbPost: async (p, body) => ({ id: 'payout-1', ...body }),
+      supabaseRequest: async (p, opts) => {
+        upserted = { path: p, body: JSON.parse(opts.body), prefer: opts.prefer };
+        return { ok: true, json: async () => ({}) };
+      },
     },
   });
   const res = makeRes();
-  await handler({ method: 'POST', body: { tutorName: 'Azeem Omar-Mufti', amountPence: 5000 } }, res);
-  assert.equal(res.statusCode, 201);
+  await handler({ method: 'POST', body: { action: 'set-payout-cycle', tutorName: 'Suleiman', payoutCycle: 'monthly' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(upserted.path, '/tutor_accounts?on_conflict=tutor_name');
+  assert.deepEqual(upserted.body, { tutor_name: 'Suleiman', payout_cycle: 'monthly' });
+  assert.match(upserted.prefer, /merge-duplicates/);
 });
 
 test('POST payouts approve-and-transfer is unaffected — still admin-gated as before', async () => {
