@@ -275,7 +275,7 @@ module.exports = async (req, res) => {
       if (!myTutorName) return res.status(200).json({ recentBookings: [] });
       const bookings = await dbGet(
         `/bookings?tutor_name=eq.${encodeURIComponent(myTutorName)}` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,payment_status,meet_link,stripe_payment_intent_id,payment_link,student_id,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc`
+        `&select=id,subject,tutor_name,lesson_type,start_time,end_time,fee_pence,status,payment_status,delivery_status,meet_link,stripe_payment_intent_id,payment_link,student_id,students(student_name,parent_email,stripe_customer_id)&order=start_time.desc`
       );
       return res.status(200).json({
         recentBookings: bookings.map(b => ({
@@ -285,9 +285,14 @@ module.exports = async (req, res) => {
           subject: b.subject,
           lessonType: b.lesson_type,
           startTime: b.start_time,
+          // SCRUM-88: the portal needs end_time to know a lesson has actually
+          // finished (and so can be attested), and delivery_status to know
+          // whether it still owes an answer.
+          endTime: b.end_time,
           feePence: b.fee_pence,
           status: b.status,
           paymentStatus: b.payment_status,
+          deliveryStatus: b.delivery_status || null,
           meetLink: b.meet_link || null,
           paymentIntentId: b.stripe_payment_intent_id || null,
           paymentLink: b.payment_link || null,
@@ -397,9 +402,16 @@ module.exports = async (req, res) => {
         subject: b.subject,
         lessonType: b.lesson_type,
         startTime: b.start_time,
+        // SCRUM-88: admin needs to see which lessons are still unattested —
+        // they are the ones holding up both billing and payouts.
+        endTime: b.end_time,
         feePence: b.fee_pence,
         status: b.status,
         paymentStatus: b.payment_status,
+        deliveryStatus: b.delivery_status || null,
+        deliveryMarkedBy: b.delivery_marked_by || null,
+        deliveryNote: b.delivery_note || null,
+        paidOutAt: b.paid_out_at || null,
         meetLink: b.meet_link || null,
         paymentIntentId: b.stripe_payment_intent_id || null,
         paymentLink: b.payment_link || null,
