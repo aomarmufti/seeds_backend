@@ -222,7 +222,7 @@ module.exports = async (req, res) => {
         // for what you complete" applies to both sides of this marketplace,
         // not just the family's side.
         const bookings = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&delivery_status=in.(delivered,no_show,late_cancelled)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`
+          `/bookings?tutor_name=eq.${encodeURIComponent(acct.tutor_name)}&delivery_status=in.(delivered,no_show,late_cancelled,partial)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`
         );
         if (!bookings.length) { results.push({ tutor: acct.tutor_name, status: 'nothing_due' }); continue; }
         const amount = Math.round(bookings.reduce((s,b) => s + b.fee_pence, 0) * 0.78);
@@ -845,7 +845,13 @@ module.exports = async (req, res) => {
     // measure notice against the lesson's start time. Letting it be posted
     // directly would make "the family cancelled late" an assertion anyone
     // could make after the fact rather than something the clock decided.
-    const OUTCOMES = ['delivered', 'no_show', 'waived'];
+    //
+    // Everything else a week of teaching actually throws up is settable, so
+    // a tutor never has to choose between billing a family for a lesson that
+    // didn't happen and leaving the booking unanswered forever. Which of
+    // these bill is decided by the billing/payout sweeps, not here — see
+    // BILLABLE_OUTCOMES in lib/cancellationPolicy.js.
+    const OUTCOMES = ['delivered', 'partial', 'no_show', 'cancelled_mutual', 'tutor_cancelled', 'waived'];
     if (!OUTCOMES.includes(outcome)) {
       return res.status(400).json({ error: `outcome must be one of: ${OUTCOMES.join(', ')}` });
     }
@@ -886,18 +892,24 @@ module.exports = async (req, res) => {
         return res.status(409).json({ error: 'This lesson has already been paid out and can\'t be re-marked.' });
       }
 
+      const { BILLABLE_OUTCOMES } = require('../lib/cancellationPolicy');
+      const happened = ['delivered', 'partial', 'no_show'].includes(outcome);
       const patch = {
         delivery_status: outcome,
         delivery_marked_by: caller.email,
-        delivered_at: outcome === 'waived' ? null : new Date().toISOString(),
+        // delivered_at means "when the slot was consumed". A lesson that was
+        // cancelled or waived never consumed one, so it stays null rather
+        // than recording a time nothing happened at.
+        delivered_at: happened ? new Date().toISOString() : null,
       };
       if (note != null) patch.delivery_note = note;
       // status now says what happened to the lesson rather than doubling as
       // the payout marker (see the paid_out_at migration). A no-show still
-      // concluded — the slot was held and consumed — so both it and a
-      // delivered lesson land on 'completed'; a waived lesson is left in
-      // whatever state it was in.
-      if (outcome === 'delivered' || outcome === 'no_show') patch.status = 'completed';
+      // concluded — the slot was held and consumed — so it lands on
+      // 'completed' alongside a taught lesson; the cancellation outcomes
+      // move the booking to 'cancelled', which is what they actually are.
+      if (happened) patch.status = 'completed';
+      else if (outcome === 'cancelled_mutual' || outcome === 'tutor_cancelled') patch.status = 'cancelled';
 
       const r = await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
         method: 'PATCH', prefer: 'return=representation', body: JSON.stringify(patch),

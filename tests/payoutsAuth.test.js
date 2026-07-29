@@ -173,7 +173,7 @@ test('POST payouts approve-and-transfer only pays out lessons that were paid for
   // payable — a slot whose time has come and gone is not evidence anyone
   // taught anything.
   assert.ok(
-    queriedPath.includes('delivery_status=in.(delivered,no_show,late_cancelled)'),
+    queriedPath.includes('delivery_status=in.(delivered,no_show,late_cancelled,partial)'),
     'must only pay out lessons whose outcome someone actually confirmed'
   );
   assert.ok(!queriedPath.includes('end_time=lte.'), 'end_time must no longer stand in for attestation');

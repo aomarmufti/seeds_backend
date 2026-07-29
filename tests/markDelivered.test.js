@@ -150,6 +150,53 @@ test('an over-long note is rejected rather than truncated', async () => {
   assert.equal(patches.length, 0);
 });
 
+test('a lesson cut short by the student is still billed in full', async () => {
+  // The tutor held and delivered the slot; the student leaving early is not
+  // the tutor's loss to absorb.
+  const { handler, patches } = load(baseBooking(), tutorCaller);
+  const res = await call(handler, { bookingId: 'booking-1', outcome: 'partial' });
+  assert.equal(res.statusCode, 200);
+  assert.equal(patches[0].delivery_status, 'partial');
+  assert.equal(patches[0].status, 'completed');
+  assert.ok(patches[0].delivered_at, 'the slot was consumed, so it has a delivery time');
+});
+
+test('a mutually agreed cancellation bills nobody and reads as cancelled', async () => {
+  const { handler, patches } = load(baseBooking(), tutorCaller);
+  const res = await call(handler, { bookingId: 'booking-1', outcome: 'cancelled_mutual' });
+  assert.equal(res.statusCode, 200);
+  assert.equal(patches[0].delivery_status, 'cancelled_mutual');
+  assert.equal(patches[0].status, 'cancelled');
+  assert.equal(patches[0].delivered_at, null, 'nothing was delivered, so no delivery time');
+});
+
+test('a tutor cancelling their own lesson bills nobody', async () => {
+  const { handler, patches } = load(baseBooking(), tutorCaller);
+  const res = await call(handler, { bookingId: 'booking-1', outcome: 'tutor_cancelled' });
+  assert.equal(res.statusCode, 200);
+  assert.equal(patches[0].delivery_status, 'tutor_cancelled');
+  assert.equal(patches[0].status, 'cancelled');
+  assert.equal(patches[0].delivered_at, null);
+});
+
+test('every outcome the tutor can pick is either billable or explicitly not', async () => {
+  // Guards the seam between this endpoint's accepted outcomes and the set the
+  // billing/payout sweeps filter on. An outcome that exists here but appears
+  // in neither list would be silently unbillable forever.
+  const { BILLABLE_OUTCOMES } = require('../lib/cancellationPolicy');
+  const SETTABLE = ['delivered', 'partial', 'no_show', 'cancelled_mutual', 'tutor_cancelled', 'waived'];
+  const NOT_BILLABLE = ['cancelled_mutual', 'tutor_cancelled', 'waived'];
+  for (const o of SETTABLE) {
+    assert.equal(
+      BILLABLE_OUTCOMES.includes(o), !NOT_BILLABLE.includes(o),
+      `${o} must be clearly on one side of the billing line`
+    );
+  }
+  // late_cancelled isn't settable here but must still bill — the family gave
+  // less than 18 hours' notice and the tutor held the slot.
+  assert.ok(BILLABLE_OUTCOMES.includes('late_cancelled'));
+});
+
 test('awaiting-delivery lists only finished, unattested lessons for that tutor', async () => {
   let queried;
   const handler = loadWithMocks('api/lifecycle.js', {

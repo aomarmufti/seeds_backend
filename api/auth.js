@@ -5,6 +5,7 @@ const { supabaseRequest, supabaseAdminRequest, dbGet } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { registerTutor } = require('../lib/tutors');
+const { isValidId } = require('../lib/validate');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -104,8 +105,21 @@ module.exports = async (req, res) => {
   // the initial lead assignment, so admin had no way to give a student a
   // tutor (or move them to a different one) after the fact.
   if (action === 'assign-tutor') {
-    const { userId, tutorName } = req.body;
-    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const { userId, tutorName, studentId } = req.body;
+    // A student assigned from a lead has a students row but no auth user yet,
+    // so there is no userId to key on — assign against the record instead.
+    if (!userId && studentId) {
+      if (!isValidId(studentId)) return res.status(400).json({ error: 'Invalid studentId' });
+      try {
+        const sr = await supabaseRequest(`/students?id=eq.${studentId}`, {
+          method: 'PATCH', prefer: 'return=minimal',
+          body: JSON.stringify({ assigned_tutor: tutorName || null }),
+        });
+        if (!sr.ok) { const d = await sr.json(); throw new Error(JSON.stringify(d)); }
+        return res.status(200).json({ success: true });
+      } catch(e) { return res.status(500).json({ error: e.message }); }
+    }
+    if (!userId) return res.status(400).json({ error: 'userId or studentId required' });
     try {
       const r = await supabaseRequest('/profiles?id=eq.' + userId, {
         method: 'PATCH', prefer: 'return=minimal',
