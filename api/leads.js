@@ -1,7 +1,7 @@
 // api/leads.js — GET, POST, PATCH /api/leads
 // Also handles action=select-slot to convert a proposed slot into a real booking
 const { applyCors } = require('../lib/cors');
-const { dbGet, dbPost, supabaseRequest } = require('../lib/db');
+const { dbGet, dbPost, dbPatch, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { isValidId, normalizeEmail } = require('../lib/validate');
 const { getMeetingLink } = require('../lib/tutors');
@@ -205,6 +205,53 @@ module.exports = async (req, res) => {
       const data = await r.json();
       if (!r.ok) throw new Error(JSON.stringify(data));
       const lead = data[0];
+
+      // Assigning a lead to a tutor used to update this row and email people,
+      // and nothing else — so the family existed only as a lead. Admin's
+      // Students page reads the students table, the tutor portal's roster
+      // reads students too, and neither could see someone who'd been assigned
+      // but hadn't booked yet: the assignment was invisible to everyone
+      // except whoever read the email.
+      //
+      // Creating the students row here makes the assignment real. It's an
+      // upsert on parent_email because the same family may already exist from
+      // an earlier booking or an approved signup, and we must not create a
+      // second record for them.
+      if (updates.assigned_tutor && lead?.email) {
+        try {
+          const leadEmail = normalizeEmail(lead.email);
+          const existing = await dbGet(
+            `/students?parent_email=eq.${encodeURIComponent(leadEmail)}&select=id&limit=1`
+          );
+          if (existing.length) {
+            await dbPatch(`/students?id=eq.${existing[0].id}`, {
+              assigned_tutor: updates.assigned_tutor,
+              lead_id: lead.id,
+            });
+          } else {
+            await dbPost('/students', {
+              parent_name: lead.name,
+              parent_email: leadEmail,
+              parent_phone: lead.phone || null,
+              student_name: lead.name,
+              assigned_tutor: updates.assigned_tutor,
+              lead_id: lead.id,
+            });
+          }
+          // Keep the account's own profile in step when the family has
+          // already signed up, so the student portal shows the same tutor
+          // admin just picked.
+          await supabaseRequest(
+            `/profiles?email=eq.${encodeURIComponent(leadEmail)}`,
+            { method: 'PATCH', prefer: 'return=minimal',
+              body: JSON.stringify({ assigned_tutor: updates.assigned_tutor }) }
+          );
+        } catch (linkErr) {
+          // Never fail the assignment itself over this — the lead is already
+          // updated and the emails below still need to go out.
+          console.warn('Lead->student link failed:', linkErr.message);
+        }
+      }
 
       // Email tutor when a student is assigned to them
       if (updates.status === 'assigned' && updates.assigned_tutor && lead) {

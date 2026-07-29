@@ -112,6 +112,21 @@ module.exports = async (req, res) => {
         body: JSON.stringify({ assigned_tutor: tutorName || null }),
       });
       if (!r.ok) { const d = await r.json(); throw new Error(JSON.stringify(d)); }
+      // profiles is the account record, but every Students view — admin's
+      // list, the tutor portal's roster — reads the students table. Writing
+      // only profiles meant an assignment made here was invisible in both.
+      try {
+        const profiles = await dbGet(`/profiles?id=eq.${userId}&select=email&limit=1`);
+        const email = profiles[0]?.email;
+        if (email) {
+          await supabaseRequest(`/students?parent_email=eq.${encodeURIComponent(email)}`, {
+            method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ assigned_tutor: tutorName || null }),
+          });
+        }
+      } catch (syncErr) {
+        console.warn('assign-tutor students sync failed:', syncErr.message);
+      }
       return res.status(200).json({ success: true });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
