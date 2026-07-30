@@ -181,7 +181,7 @@ module.exports = async (req, res) => {
         // makes this PATCH idempotent: an already-paid booking has a
         // non-null paid_out_at and drops out of the filter.
         await supabaseRequest(
-          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&delivery_status=in.(delivered,no_show,late_cancelled)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`,
+          `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&delivery_status=in.(delivered,no_show,late_cancelled,partial)&payment_status=eq.paid&fee_pence=gt.0&paid_out_at=is.null`,
           { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ paid_out_at: new Date().toISOString() }) }
         );
         let transferId = null, transferStatus = 'manual';

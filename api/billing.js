@@ -302,7 +302,7 @@ async function billStudentBatch(student, cycle, payments) {
   // status='cancelled' with delivery_status='late_cancelled'.
   const bookings = await dbGet(
     `/bookings?student_id=eq.${student.id}&payment_status=eq.unbilled&fee_pence=gt.0` +
-    `&delivery_status=in.(delivered,no_show,late_cancelled)&order=start_time.asc`
+    `&delivery_status=in.(delivered,no_show,late_cancelled,partial)&order=start_time.asc`
   );
   if (!bookings.length) return { status: 'nothing_due' };
 

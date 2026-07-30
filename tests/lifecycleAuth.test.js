@@ -547,7 +547,7 @@ test('resource=auto-payout only pays tutors for bookings the student has actuall
     // SCRUM-88: a lesson is payable because someone confirmed what happened,
     // not because its end_time drifted into the past.
     assert.ok(
-      p.includes('delivery_status=in.(delivered,no_show,late_cancelled)'),
+      p.includes('delivery_status=in.(delivered,no_show,late_cancelled,partial)'),
       'must not pay a tutor for a lesson nobody has confirmed happened'
     );
     assert.ok(!p.includes('end_time=lte.'), 'end_time must no longer stand in for attestation');
