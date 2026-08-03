@@ -271,88 +271,93 @@ module.exports = async (req, res) => {
   // ── LESSONS — tutor creates a booking directly ────────────────────────
   // Called by both the student portal (booking a lesson for themselves) and
   // the tutor portal (adding a lesson for one of their students), so the
-  // caller must be either the named tutor or that student's own parent.
+  // caller must be either the enrolment's tutor or that student's own parent.
+  // Accepts enrolmentId instead of tutorName/subject/studentLevel (SCRUM-XX49).
   if (resource === 'lessons') {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
     const b = req.body || {};
-    if (!b.tutorName || !b.startTime || !b.subject) {
-      return res.status(400).json({ error: 'tutorName, subject, startTime required' });
+    if (!b.enrolmentId || !b.startTime) {
+      return res.status(400).json({ error: 'enrolmentId and startTime required' });
+    }
+    if (!isValidId(b.enrolmentId)) {
+      return res.status(400).json({ error: 'Invalid enrolmentId' });
     }
     const caller = await requireAuth(req, res);
     if (!caller) return;
-    const isTutor = await verifyTutorIdentity(caller, b.tutorName);
-    let studentId = b.studentId;
-    if (!studentId) {
-      // A tutor must name which student they're booking for; a student/
-      // parent booking their own lesson doesn't need to (and can't be
-      // trusted to) supply someone else's studentId — self-heal to their
-      // own record instead of requiring it upfront.
-      if (isTutor) return res.status(400).json({ error: 'studentId required' });
-      const own = await findOrCreateOwnStudentRecord(caller, b.studentName);
-      studentId = own.id;
-    } else if (!isTutor && !(await verifyStudentAccess(caller, studentId))) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
+
     try {
-      const meetingLink = await getMeetingLink(b.tutorName);
+      // Fetch the enrolment to validate it exists and is active
+      const enrolments = await dbGet(`/enrolments?id=eq.${b.enrolmentId}&limit=1`);
+      if (!enrolments.length) {
+        return res.status(404).json({ error: 'Enrolment not found' });
+      }
+      const enrolment = enrolments[0];
+      if (enrolment.status !== 'active') {
+        return res.status(409).json({ error: 'Enrolment is not active' });
+      }
+
+      const studentId = enrolment.student_id;
+      const tutorId = enrolment.tutor_id;
+      const subject = enrolment.subject;
+      const ratePence = enrolment.rate_pence;
+
+      // Verify caller access
+      const isTutor = tutorId && caller.role === 'tutor'
+        ? (await dbGet(`/profiles?id=eq.${caller.id}&tutor_id=eq.${tutorId}&limit=1`)).length > 0
+        : false;
+      const isParent = await verifyStudentAccess(caller, studentId);
+
+      if (!isTutor && !isParent) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // Get tutor name for conflict detection and meeting link
+      let tutorName = null;
+      if (tutorId) {
+        const tutors = await dbGet(`/tutors?id=eq.${tutorId}&select=name&limit=1`);
+        tutorName = tutors[0]?.name;
+      }
+
+      const meetingLink = tutorName ? await getMeetingLink(tutorName) : null;
       const lessonType = b.lessonType || 'gcse';
-      // Priced from lib/pricing.js, the single source of truth. This used to
-      // be a local `feeMap` of gcse/alevel/group/trial with a `?? 4000`
-      // fallback and no 'consultation' key at all — so a free 15-minute
-      // consultation was silently charged £40, and because the pending-
-      // confirmation flow keys off fee === 0, a student's consultation
-      // request never landed as 'requested' either. The map also forced
-      // every lesson to 55 minutes regardless of type.
-      const price = resolvePrice(lessonType, b.studentLevel);
+      const price = resolvePrice(lessonType, enrolment.level);
       const created = [];
       const weeks = b.recurringWeeks && b.recurringWeeks > 1 ? b.recurringWeeks : 1;
       const start = new Date(b.startTime);
 
       for (let i = 0; i < weeks; i++) {
         const slotStart = new Date(start.getTime() + i * 7 * 24 * 60 * 60 * 1000);
-        const slotEnd   = new Date(slotStart.getTime() + (b.durationMins || 55) * 60 * 1000);
+        const slotEnd   = new Date(slotStart.getTime() + (b.durationMins || price.duration) * 60 * 1000);
 
-        // ── Conflict detection ──────────────────────────────────────────
-        const conflicts = await dbGet(
-          `/bookings?tutor_name=eq.${encodeURIComponent(b.tutorName)}&status=neq.cancelled&start_time=gte.${slotStart.toISOString()}&start_time=lt.${slotEnd.toISOString()}&limit=1`
-        );
-        if (conflicts.length) {
-          if (weeks === 1) {
-            return res.status(409).json({
-              error: `${b.tutorName} already has a lesson at that time. Please choose a different slot.`,
-              conflict: true,
-              existingLesson: { startTime: conflicts[0].start_time },
-            });
+        // ── Conflict detection (if tutor assigned) ──────────────────────
+        if (tutorName) {
+          const conflicts = await dbGet(
+            `/bookings?tutor_name=eq.${encodeURIComponent(tutorName)}&status=neq.cancelled&start_time=gte.${slotStart.toISOString()}&start_time=lt.${slotEnd.toISOString()}&limit=1`
+          );
+          if (conflicts.length) {
+            if (weeks === 1) {
+              return res.status(409).json({
+                error: `${tutorName} already has a lesson at that time. Please choose a different slot.`,
+                conflict: true,
+                existingLesson: { startTime: conflicts[0].start_time },
+              });
+            }
+            // Skip conflicting week in recurring series
+            created.push({ skipped: true, startTime: slotStart.toISOString(), reason: 'conflict' });
+            continue;
           }
-          // Skip conflicting week in recurring series
-          created.push({ skipped: true, startTime: slotStart.toISOString(), reason: 'conflict' });
-          continue;
         }
-        const fee = price.amount;
+
+        const fee = ratePence || price.amount;
         const booking = await dbPost('/bookings', {
           student_id: studentId,
-          tutor_name: b.tutorName,
-          subject: b.subject || null,
+          enrolment_id: b.enrolmentId,
+          tutor_name: tutorName || null,
+          subject: subject || null,
           lesson_type: lessonType,
           start_time: slotStart.toISOString(),
           duration_mins: b.durationMins || price.duration,
           fee_pence: fee,
-          // Booking a lesson no longer gates on payment at all — payment
-          // is billed periodically per the family's own billing_cycle for
-          // lessons that have actually happened (see api/cron-billing.js),
-          // not charged (or a payment link emailed) the moment it's
-          // booked. status is purely the lesson's own lifecycle; whether
-          // it's been paid for is tracked separately via payment_status.
-          // SCRUM-87: a free session a student books for themselves (their
-          // Initial Consultation, or the trial that follows it) lands as
-          // 'requested' — it shows in their calendar straight away tagged
-          // "Pending tutor confirmation", and the tutor confirms it from
-          // their own portal. Anything a tutor books, and every paid
-          // lesson, is confirmed outright as before. 'requested' is already
-          // an allowed status and still holds the slot against
-          // bookings_no_tutor_overlap, so it can't be double-booked; every
-          // payout path filters on confirmed + paid + fee > 0, so a
-          // requested free session can never be paid out.
           status: (!isTutor && fee === 0) ? 'requested' : 'confirmed',
           payment_status: fee === 0 ? 'free' : 'unbilled',
           meet_link: meetingLink,
@@ -369,12 +374,6 @@ module.exports = async (req, res) => {
         ...(skipped.length ? { note: `${skipped.length} slot(s) skipped due to conflicts` } : {}),
       });
     } catch (e) {
-      // SCRUM-69: the student portal now offers booking a free trial
-      // lesson, making this constraint reachable through a real user flow
-      // for the first time (previously only api/bookings.js's public
-      // consultation path could hit its sibling constraint). Same
-      // friendly-409 treatment as the existing tutor-overlap/consultation
-      // guards below — see api/bookings.js's confirm handler.
       if (e.message.includes('bookings_one_trial_per_student')) {
         return res.status(409).json({
           error: 'This student has already booked their free trial lesson.',
