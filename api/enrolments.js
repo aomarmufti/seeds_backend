@@ -7,7 +7,7 @@
 const { applyCors } = require('../lib/cors');
 const { dbGet, dbPost, dbPatch } = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -37,7 +37,7 @@ module.exports = async (req, res) => {
       } else if (caller.role === 'student') {
         // Students see only their own enrolments
         // Look up their student record by parent_email
-        const student = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id&limit=1`);
+        const student = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id&limit=1`);
         const myStudentId = student[0]?.id;
         if (!myStudentId) return res.status(403).json({ error: 'Student account not set up' });
         path += `&student_id=eq.${myStudentId}`;
@@ -57,11 +57,32 @@ module.exports = async (req, res) => {
     const caller = await requireAuth(req, res);
     if (!caller) return;
 
-    if (caller.role !== 'admin') {
+    const { subject, level, tutor_id, status, rate_pence } = req.body;
+    let { student_id } = req.body;
+
+    // A family asking to study another subject is the one creation a student
+    // may make, and it is a request rather than an arrangement: it lands as
+    // 'pending' with no tutor and no negotiated rate, for admin to place.
+    //
+    // The design rule is that the student asks, the tutor teaches, and the
+    // admin decides. A family choosing its own tutor or its own price sounds
+    // friendly and quietly destroys capacity planning and margin, so those
+    // stay admin's — a family that sends them is told no rather than ignored.
+    const isRequest = caller.role === 'student';
+    if (!isRequest && caller.role !== 'admin') {
       return res.status(403).json({ error: 'Only admins can create enrolments' });
     }
-
-    const { student_id, subject, level, tutor_id, status, rate_pence } = req.body;
+    if (isRequest) {
+      if (tutor_id !== undefined || rate_pence !== undefined || (status && status !== 'pending')) {
+        return res.status(403).json({
+          error: 'A subject request can\'t set its own tutor, rate or status — we\'ll arrange those and confirm.',
+        });
+      }
+      const own = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id&limit=1`);
+      if (!own.length) return res.status(403).json({ error: 'Student account not set up' });
+      // Ignore any student_id on the body — a family requests for itself.
+      student_id = own[0].id;
+    }
 
     // Validate required fields
     if (!student_id || !subject || !level) {
@@ -144,10 +165,12 @@ module.exports = async (req, res) => {
         // Tutors can only read their own enrolments, not modify them
         return res.status(403).json({ error: 'Tutors cannot directly modify enrolments' });
       } else if (caller.role === 'student') {
-        // Students can only pause/end their own enrolments
-        const student = await dbGet(`/students?parent_email=eq.${encodeURIComponent(caller.email)}&select=id&limit=1`);
+        // Students can only pause/end their own enrolments. normalizeEmail
+        // because the stored parent_email is normalised and an exact match on
+        // a differently-cased login would silently fail this check.
+        const student = await dbGet(`/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=id&limit=1`);
         const myStudentId = student[0]?.id;
-        if (current.student_id !== myStudentId) {
+        if (!myStudentId || current.student_id !== myStudentId) {
           return res.status(403).json({ error: 'Cannot modify another student\'s enrolment' });
         }
         // Students can only change status to 'paused' or 'ended'
@@ -158,14 +181,31 @@ module.exports = async (req, res) => {
         return res.status(403).json({ error: 'Unauthorized' });
       }
 
-      // Build update object
-      const update = {};
-      if (status !== undefined) update.status = status;
-      if (tutor_id !== undefined) update.tutor_id = tutor_id;
-      if (rate_pence !== undefined) update.rate_pence = rate_pence;
-      if (ended_at !== undefined) update.ended_at = ended_at;
+      // What a caller may write, not merely what they may reach. The role
+      // check above validated `status` for a student and then every field on
+      // the body was applied regardless of who sent it — so a family could
+      // PATCH their own enrolment with rate_pence: 1, or hand themselves any
+      // tutor_id, and it would be written. Omitting `status` skipped the only
+      // check that existed. Rate and tutor are commercial facts and are
+      // admin's alone; a family may pause or end, and nothing else.
+      const WRITABLE = caller.role === 'admin'
+        ? ['status', 'tutor_id', 'rate_pence', 'ended_at']
+        : ['status'];
 
-      // Validate level if changing it via status
+      const requested = { status, tutor_id, rate_pence, ended_at };
+      const refused = Object.keys(requested)
+        .filter((k) => requested[k] !== undefined && !WRITABLE.includes(k));
+      if (refused.length) {
+        return res.status(403).json({
+          error: `Only an admin can change ${refused.join(' and ')} on an enrolment.`,
+        });
+      }
+
+      const update = {};
+      for (const field of WRITABLE) {
+        if (requested[field] !== undefined) update[field] = requested[field];
+      }
+
       if (status && !['pending', 'active', 'paused', 'ended'].includes(status)) {
         return res.status(400).json({ error: 'Invalid status' });
       }
