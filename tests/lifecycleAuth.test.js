@@ -136,33 +136,36 @@ test('resource=lessons rejects a caller who is neither the named tutor nor the s
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => unrelatedCaller },
     db: {
-      // The stranger has no tutor_name of their own, and isn't this
-      // student's parent either — dbForOwnership's default fixture assumes
-      // a single shared tutor identity, which doesn't fit this case.
       dbGet: async (path) => {
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 4000, status: 'active' }];
         if (path.startsWith('/students?id=eq.')) return [{ parent_email: 'parent@example.com' }];
-        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: null }];
-        if (path.startsWith('/bookings?student_id=eq.')) return [];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: null }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
         return [];
       },
     },
   });
   const res = makeRes();
-  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString() } }, res);
+  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { enrolmentId: 'enrol-1', startTime: new Date().toISOString() } }, res);
   assert.equal(res.statusCode, 403);
 });
 
 test('resource=lessons allows the named tutor even with no prior booking (first-ever lesson)', async () => {
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => tutorCaller },
-    db: { ...dbForOwnership({ hasBooking: false }), dbGet: async (path) => {
-      if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
-      if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
-      return [];
-    } },
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 4000, status: 'active' }];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: 'tutor-1' }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
+        return [];
+      },
+      dbPost: async (path, body) => ({ id: 'b1', ...body }),
+    },
   });
   const res = makeRes();
-  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString() } }, res);
+  await handler({ method: 'POST', query: { resource: 'lessons' }, body: { enrolmentId: 'enrol-1', startTime: new Date().toISOString() } }, res);
   assert.equal(res.statusCode, 201);
 });
 
@@ -171,9 +174,10 @@ test('resource=lessons creates a trial booking as confirmed immediately (free, n
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => tutorCaller },
     db: {
-      ...dbForOwnership({ hasBooking: false }),
       dbGet: async (path) => {
-        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 0, status: 'active' }];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: 'tutor-1' }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
         if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
         return [];
       },
@@ -183,7 +187,7 @@ test('resource=lessons creates a trial booking as confirmed immediately (free, n
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'trial', startTime: new Date().toISOString() },
+    body: { enrolmentId: 'enrol-1', lessonType: 'trial', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 201);
   assert.equal(posted.status, 'confirmed');
@@ -201,18 +205,20 @@ test('resource=lessons prices a student-booked consultation at zero and holds it
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => ({ id: 'parent-1', role: 'student', email: 'parent@example.com' }) },
     db: {
-      // Caller is this student's own parent (matched on parent_email) and
-      // has no tutor_name — a real parent isn't a tutor, and that is what
-      // makes this the student-books-for-themselves path rather than a
-      // tutor scheduling on their behalf.
-      ...dbForOwnership({ hasBooking: true, tutorName: null }),
+      dbGet: async (path) => {
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 0, status: 'active' }];
+        if (path.startsWith('/students?id=eq.')) return [{ parent_email: 'parent@example.com' }];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: null }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
+        return [];
+      },
       dbPost: async (path, body) => { if (path === '/bookings') posted = body; return { id: 'b1', ...body }; },
     },
   });
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'consultation', startTime: new Date().toISOString() },
+    body: { enrolmentId: 'enrol-1', lessonType: 'consultation', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 201);
   assert.equal(posted.fee_pence, 0, 'an Initial Consultation is free — never £40');
@@ -231,9 +237,10 @@ test('resource=lessons returns a friendly 409 when the student already has a tri
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => tutorCaller },
     db: {
-      ...dbForOwnership({ hasBooking: false }),
       dbGet: async (path) => {
-        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 0, status: 'active' }];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: 'tutor-1' }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
         if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
         return [];
       },
@@ -246,7 +253,7 @@ test('resource=lessons returns a friendly 409 when the student already has a tri
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'trial', startTime: new Date().toISOString() },
+    body: { enrolmentId: 'enrol-1', lessonType: 'trial', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 409);
   assert.equal(res.body.conflict, true);
@@ -264,9 +271,10 @@ test('resource=lessons creates a paid booking as confirmed immediately, with pay
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => tutorCaller },
     db: {
-      ...dbForOwnership({ hasBooking: false }),
       dbGet: async (path) => {
-        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+        if (path.startsWith('/enrolments?id=eq.')) return [{ id: 'enrol-1', student_id: 'student-1', tutor_id: 'tutor-1', subject: 'Maths', level: 'GCSE', rate_pence: 4000, status: 'active' }];
+        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_id: 'tutor-1' }];
+        if (path.startsWith('/tutors?id=eq.')) return [{ name: 'Azeem Omar-Mufti' }];
         if (path.startsWith('/bookings?tutor_name=eq.') && path.includes('status=neq.cancelled')) return [];
         return [];
       },
@@ -276,7 +284,7 @@ test('resource=lessons creates a paid booking as confirmed immediately, with pay
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { studentId: 'student-1', tutorName: 'Azeem Omar-Mufti', subject: 'Maths', lessonType: 'gcse', startTime: new Date().toISOString() },
+    body: { enrolmentId: 'enrol-1', lessonType: 'gcse', startTime: new Date().toISOString() },
   }, res);
   assert.equal(res.statusCode, 201);
   assert.equal(posted.status, 'confirmed');
@@ -284,30 +292,20 @@ test('resource=lessons creates a paid booking as confirmed immediately, with pay
 });
 
 test('resource=lessons self-heals a missing students row for a student/parent booking their own first lesson', async () => {
-  let posted;
+  // With enrolment-based booking, students must have an enrolment first.
+  // This test validates that the API requires enrolmentId upfront.
   const handler = loadWithMocks('api/lifecycle.js', {
     auth: { requireAuth: async () => parentCaller },
-    db: {
-      dbGet: async (path) => {
-        if (path.startsWith('/profiles?id=eq.')) return [{ tutor_name: null }];
-        if (path.startsWith('/students?parent_email=eq.')) return [];
-        if (path.startsWith('/bookings?tutor_name=eq.')) return [];
-        return [];
-      },
-      dbPost: async (path, body) => {
-        if (path === '/students') { posted = body; return { id: 'new-student-1' }; }
-        return { id: 'booking-1', student_id: body.student_id };
-      },
-    },
+    db: { dbGet: async () => [], dbPost: async () => ({ id: 'b1' }) },
   });
   const res = makeRes();
   await handler({
     method: 'POST', query: { resource: 'lessons' },
-    body: { tutorName: 'Azeem Omar-Mufti', subject: 'Maths', startTime: new Date().toISOString(), studentName: 'Jamie' },
+    body: { startTime: new Date().toISOString(), studentName: 'Jamie' },
   }, res);
-  assert.equal(res.statusCode, 201);
-  assert.equal(posted.parent_email, 'parent@example.com');
-  assert.equal(res.body.bookings[0].student_id, 'new-student-1');
+  // Missing enrolmentId should return 400
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /enrolmentId/i);
 });
 
 test('resource=lessons requires studentId when the caller is the tutor themselves', async () => {
