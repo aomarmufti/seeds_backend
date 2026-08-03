@@ -245,7 +245,7 @@ test('resource=lessons returns a friendly 409 when the student already has a tri
         return [];
       },
       dbPost: async (path) => {
-        if (path === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_trial_per_student"');
+        if (path === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_consumed_trial_per_student"');
         return { id: 'b1' };
       },
     },
