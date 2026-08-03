@@ -1,11 +1,17 @@
 // api/auth.js — POST /api/auth
 // Routes by action: create-student | approve-student | invite-tutor | create-tutor
+//   | deactivate-account | deactivate-tutor | reactivate-account
+//   | delete-account | delete-tutor
+//
+// Deactivate and delete are deliberately different operations: deactivating
+// keeps every record and is reversible, deleting is permanent and is refused
+// wherever there is history to lose. See SCRUM-97.
 const { applyCors } = require('../lib/cors');
 const { supabaseRequest, supabaseAdminRequest, dbGet } = require('../lib/db');
 const { requireAdmin } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { registerTutor } = require('../lib/tutors');
-const { isValidId } = require('../lib/validate');
+const { isValidId, normalizeEmail } = require('../lib/validate');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -160,6 +166,126 @@ module.exports = async (req, res) => {
       await supabaseRequest('/profiles?id=eq.' + userId,
         { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: 'deactivated' }) }
       );
+      return res.status(200).json({ success: true });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── REACTIVATE AN ACCOUNT (SCRUM-97) ──────────────────────
+  // Deactivation was one-way: the ban lasts a century and the original role
+  // is overwritten with 'deactivated', so there was no path back for an
+  // account removed by mistake. The role can't be recovered from the profile
+  // (it's what got overwritten), so the caller states it.
+  if (action === 'reactivate-account') {
+    const { userId, role } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const restoredRole = role === 'tutor' ? 'tutor' : 'student';
+    try {
+      // 'none' is Supabase's way of lifting a ban.
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId,
+        { method: 'PUT', body: JSON.stringify({ ban_duration: 'none' }) }
+      );
+      await supabaseRequest('/profiles?id=eq.' + userId,
+        { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ role: restoredRole }) }
+      );
+      return res.status(200).json({ success: true, role: restoredRole });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── PERMANENTLY DELETE A STUDENT ACCOUNT (SCRUM-97) ───────
+  // Deletion is for data that should never have existed — test accounts,
+  // duplicates, a signup abandoned before anything happened. It is not the
+  // way to remove a family who has left: that is deactivation, which keeps
+  // their lessons, invoices and safeguarding history intact.
+  //
+  // So this refuses wherever history exists, and says what is blocking it.
+  // The check is also a practical necessity: bookings reference students(id)
+  // with no ON DELETE rule, so deleting underneath them would fail on the
+  // foreign key anyway — better to explain than to surface a constraint
+  // error. Enrolments cascade from the student row and need no handling.
+  if (action === 'delete-account') {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    if (userId === admin.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+    if (!isValidId(userId)) return res.status(400).json({ error: 'Invalid userId' });
+    try {
+      const profiles = await dbGet(`/profiles?id=eq.${userId}&select=email&limit=1`);
+      const profile = profiles[0];
+      if (!profile) return res.status(404).json({ error: 'Account not found' });
+
+      const email = normalizeEmail(profile.email || '');
+      const students = email
+        ? await dbGet(`/students?parent_email=eq.${encodeURIComponent(email)}&select=id`)
+        : [];
+      const studentIds = students.map((s) => s.id);
+
+      if (studentIds.length) {
+        const inList = `(${studentIds.join(',')})`;
+        const [bookings, batches] = await Promise.all([
+          dbGet(`/bookings?student_id=in.${inList}&select=id&limit=1`),
+          dbGet(`/billing_batches?student_id=in.${inList}&select=id&limit=1`),
+        ]);
+        const blockers = [];
+        if (bookings.length) blockers.push('lessons');
+        if (batches.length) blockers.push('billing history');
+        if (blockers.length) {
+          return res.status(409).json({
+            error: `This account has ${blockers.join(' and ')} and can't be deleted. Deactivate it instead — that keeps the records and stops them signing in.`,
+            blockedBy: blockers,
+          });
+        }
+      }
+
+      for (const id of studentIds) {
+        await supabaseRequest(`/students?id=eq.${id}`, { method: 'DELETE', prefer: 'return=minimal' });
+      }
+      await supabaseRequest(`/profiles?id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' });
+      await supabaseAdminRequest('/auth/v1/admin/users/' + userId, { method: 'DELETE' });
+      return res.status(200).json({ success: true, deletedStudentRows: studentIds.length });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ── PERMANENTLY DELETE A TUTOR ACCOUNT (SCRUM-97) ─────────
+  // Same rule as delete-account. A tutor who has taught or been paid is a
+  // financial record; only one who never got started can be removed.
+  //
+  // bookings.tutor_name is a string with no foreign key, so nothing would
+  // stop the delete at the database level — which is exactly why the check
+  // matters here: it would silently orphan every lesson they taught.
+  if (action === 'delete-tutor') {
+    const { userId, tutorName } = req.body;
+    if (!userId && !tutorName) return res.status(400).json({ error: 'userId or tutorName required' });
+    if (userId && userId === admin.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+    if (userId && !isValidId(userId)) return res.status(400).json({ error: 'Invalid userId' });
+    try {
+      let name = tutorName;
+      if (!name && userId) {
+        const profiles = await dbGet(`/profiles?id=eq.${userId}&select=tutor_name,full_name&limit=1`);
+        name = profiles[0]?.tutor_name || profiles[0]?.full_name || null;
+      }
+      if (!name) return res.status(404).json({ error: 'Tutor not found' });
+
+      const [bookings, payouts] = await Promise.all([
+        dbGet(`/bookings?tutor_name=eq.${encodeURIComponent(name)}&select=id&limit=1`),
+        dbGet(`/payouts?tutor_name=eq.${encodeURIComponent(name)}&select=id&limit=1`),
+      ]);
+      const blockers = [];
+      if (bookings.length) blockers.push('lessons');
+      if (payouts.length) blockers.push('payouts');
+      if (blockers.length) {
+        return res.status(409).json({
+          error: `${name} has ${blockers.join(' and ')} on record and can't be deleted. Deactivate instead — that keeps the history and stops them signing in.`,
+          blockedBy: blockers,
+        });
+      }
+
+      // enrolments.tutor_id is ON DELETE SET NULL, so any pending enrolment
+      // pointing here survives as unassigned rather than disappearing.
+      await supabaseRequest(`/tutor_accounts?tutor_name=eq.${encodeURIComponent(name)}`, { method: 'DELETE', prefer: 'return=minimal' });
+      await supabaseRequest(`/tutors?name=eq.${encodeURIComponent(name)}`, { method: 'DELETE', prefer: 'return=minimal' });
+      if (userId) {
+        await supabaseRequest(`/profiles?id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' });
+        await supabaseAdminRequest('/auth/v1/admin/users/' + userId, { method: 'DELETE' });
+      }
       return res.status(200).json({ success: true });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
