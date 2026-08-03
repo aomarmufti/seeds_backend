@@ -19,7 +19,11 @@ module.exports = async (req, res) => {
     if (!caller) return;
 
     const { student_id, tutor_id, status } = req.query;
-    let path = '/enrolments?order=created_at.desc';
+    // Embed the tutor's name. Every caller of this wants to show who teaches
+    // an enrolment, and a tutor_id is a UUID to everyone but the database —
+    // leaving the portals to resolve it means either an extra round trip or,
+    // for a family, no way at all: no student-readable endpoint lists tutors.
+    let path = '/enrolments?select=*,tutors(name)&order=created_at.desc';
 
     try {
       if (caller.role === 'admin') {
