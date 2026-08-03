@@ -138,10 +138,16 @@ module.exports = async (req, res) => {
           }
         }
         const origin = body.returnOrigin || process.env.FRONTEND_URL || 'https://seedsinstitute.co.uk';
+        // Both journeys end back on the tutor's own profile, which is where
+        // the payout status lives and where they started. These pointed at
+        // /seeds-full-platform.html — the legacy single-page build — so a
+        // tutor finishing at Stripe landed on a 404 in the Next.js app
+        // (SCRUM-92). refresh_url is where Stripe sends them if the link
+        // expired or they backed out; return_url when they're done.
         const link = await stripe.accountLinks.create({
           account: accountId,
-          refresh_url: `${origin}/seeds-full-platform.html?connect=refresh`,
-          return_url: `${origin}/seeds-full-platform.html?connect=done`,
+          refresh_url: `${origin}/tutor/profile?connect=refresh`,
+          return_url: `${origin}/tutor/profile?connect=done`,
           type: 'account_onboarding',
         });
         return res.status(200).json({ success: true, url: link.url, accountId });
