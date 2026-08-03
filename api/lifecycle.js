@@ -10,6 +10,7 @@ const { requireAdmin, requireAuth } = require('../lib/auth');
 const { logAdminAction } = require('../lib/auditLog');
 const { getMeetingLink } = require('../lib/tutors');
 const { refundBooking } = require('../lib/refunds');
+const { trialConsumed } = require('../lib/trialEligibility');
 
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) return null;
@@ -320,6 +321,22 @@ module.exports = async (req, res) => {
 
       const meetingLink = tutorName ? await getMeetingLink(tutorName) : null;
       const lessonType = b.lessonType || 'gcse';
+
+      // SCRUM-94: refuse a second trial only when the first was actually
+      // taught. Left to the database this lands in the wrong place — the
+      // booking would insert happily and then refuse to be marked delivered,
+      // stranding a tutor who had just taught the lesson.
+      if (lessonType === 'trial') {
+        const { consumed, booking: usedBy } = await trialConsumed(dbGet, studentId);
+        if (consumed) {
+          return res.status(409).json({
+            error: 'This student has already had their free trial lesson.',
+            conflict: true,
+            ...(usedBy?.start_time ? { trialTakenOn: usedBy.start_time } : {}),
+          });
+        }
+      }
+
       const price = resolvePrice(lessonType, enrolment.level);
       const created = [];
       const weeks = b.recurringWeeks && b.recurringWeeks > 1 ? b.recurringWeeks : 1;
@@ -374,9 +391,18 @@ module.exports = async (req, res) => {
         ...(skipped.length ? { note: `${skipped.length} slot(s) skipped due to conflicts` } : {}),
       });
     } catch (e) {
-      if (e.message.includes('bookings_one_trial_per_student')) {
+      // The backstop under the check above. Two index names now, because the
+      // rule split in two: one trial actually taught, and one waiting to
+      // happen at a time (SCRUM-94).
+      if (e.message.includes('bookings_one_consumed_trial_per_student')) {
         return res.status(409).json({
-          error: 'This student has already booked their free trial lesson.',
+          error: 'This student has already had their free trial lesson.',
+          conflict: true,
+        });
+      }
+      if (e.message.includes('bookings_one_open_trial_per_student')) {
+        return res.status(409).json({
+          error: 'This student already has a free trial lesson booked.',
           conflict: true,
         });
       }

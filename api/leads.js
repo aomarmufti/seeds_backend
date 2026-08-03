@@ -1,6 +1,7 @@
 // api/leads.js — GET, POST, PATCH /api/leads
 // Also handles action=select-slot to convert a proposed slot into a real booking
 const { applyCors } = require('../lib/cors');
+const { trialConsumed } = require('../lib/trialEligibility');
 const { dbGet, dbPost, dbPatch, supabaseRequest } = require('../lib/db');
 const { resolvePrice } = require('../lib/pricing');
 const { isValidId, normalizeEmail } = require('../lib/validate');
@@ -83,6 +84,19 @@ module.exports = async (req, res) => {
           });
         }
 
+        // SCRUM-94: a returning family whose trial was already taught can't
+        // have a second one. Checked before the insert so the answer is a
+        // sentence rather than a constraint violation — and so a trial that
+        // was no-showed or cancelled still lets them book, which is the
+        // whole point of the change.
+        const { consumed } = await trialConsumed(dbGet, student.id);
+        if (consumed) {
+          return res.status(409).json({
+            error: 'This student has already had their free trial lesson.',
+            conflict: true,
+          });
+        }
+
         // Create booking
         const booking = await dbPost('/bookings', {
           student_id: student.id,
@@ -126,8 +140,13 @@ module.exports = async (req, res) => {
         if (e.message.includes('bookings_no_tutor_overlap')) {
           return res.status(409).json({ error: 'That slot was just taken. Please choose a different time.', conflict: true });
         }
-        if (e.message.includes('bookings_one_trial_per_student')) {
-          return res.status(409).json({ error: 'This student has already used their free trial lesson.', conflict: true });
+        // Backstop under the pre-insert check above (SCRUM-94). Two names
+        // now: one trial actually taught, and one waiting to happen.
+        if (e.message.includes('bookings_one_consumed_trial_per_student')) {
+          return res.status(409).json({ error: 'This student has already had their free trial lesson.', conflict: true });
+        }
+        if (e.message.includes('bookings_one_open_trial_per_student')) {
+          return res.status(409).json({ error: 'This student already has a free trial lesson booked.', conflict: true });
         }
         return res.status(500).json({ error: e.message });
       }

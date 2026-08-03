@@ -42,7 +42,7 @@ test('select-slot returns a friendly 409 when the trial-limit constraint fires',
   const handler = loadWithMocks('api/leads.js', {
     db: baseDb({
       dbPost: async (p) => {
-        if (p === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_trial_per_student"');
+        if (p === '/bookings') throw new Error('duplicate key value violates unique constraint "bookings_one_consumed_trial_per_student"');
         return { id: 'x' };
       },
     }),
