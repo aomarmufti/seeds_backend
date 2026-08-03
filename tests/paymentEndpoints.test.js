@@ -25,7 +25,11 @@ function mockAdminAuth() {
 }
 // A logged-in, non-admin parent whose own student record owns cus_1 —
 // used to exercise billing.js's ownership check on the "happy path".
-function mockOwnerAuth() {
+//
+// `ownCustomerId` is what the caller's own record resolves to when no
+// customerId is passed at all (SCRUM-93). Left unset, the parent has no
+// billing account yet — the state a family is in before their first card.
+function mockOwnerAuth({ ownCustomerId } = {}) {
   const authPath = require.resolve(path.join(backendRoot, 'lib/auth.js'));
   require.cache[authPath] = {
     id: authPath, filename: authPath, loaded: true,
@@ -35,12 +39,22 @@ function mockOwnerAuth() {
   require.cache[dbPath] = {
     id: dbPath, filename: dbPath, loaded: true,
     exports: {
-      // Mirrors a real ownership lookup: only matches when the query is
-      // actually filtering on the customer id this fixture owns (cus_1),
-      // so tests for a mismatched customerId correctly see no match.
-      dbGet: async (queryPath) => queryPath.includes('cus_1')
-        ? [{ id: 's1', parent_email: 'parent@example.com', stripe_customer_id: 'cus_1' }]
-        : [],
+      dbGet: async (queryPath) => {
+        // "Does this caller own the customer they named?" — mirrors a real
+        // ownership lookup, so a mismatched customerId correctly sees no
+        // match rather than matching on the email alone.
+        if (queryPath.includes('stripe_customer_id=eq.')) {
+          return queryPath.includes('cus_1')
+            ? [{ id: 's1', parent_email: 'parent@example.com', stripe_customer_id: 'cus_1' }]
+            : [];
+        }
+        // "Which customer is mine?" — the server-side resolution that
+        // replaced the portal digging its own id out of its bookings.
+        if (queryPath.includes('select=stripe_customer_id')) {
+          return ownCustomerId ? [{ stripe_customer_id: ownCustomerId }] : [];
+        }
+        return [];
+      },
     },
   };
 }
@@ -62,14 +76,41 @@ test('GET billing?resource=payment-methods returns a simplified card list', asyn
   assert.deepEqual(res.body, [{ id: 'pm_1', brand: 'visa', last4: '4242', expMonth: 8, expYear: 2030 }]);
 });
 
-test('GET billing?resource=payment-methods requires a customerId', async () => {
-  mockPaymentsModule({});
+// SCRUM-93: a card saved before the family's first lesson was billed used to
+// vanish on reload, because the portal could only find its own Stripe
+// customer id inside its own bookings. Omitting customerId now means "mine".
+test('GET billing?resource=payment-methods with no customerId lists the caller\'s own cards', async () => {
+  let askedFor;
+  mockPaymentsModule({
+    listPaymentMethods: async (id) => {
+      askedFor = id;
+      return [{ id: 'pm_1', card: { brand: 'visa', last4: '4242', exp_month: 8, exp_year: 2030 } }];
+    },
+  });
   mockCors();
-  mockAdminAuth();
+  mockOwnerAuth({ ownCustomerId: 'cus_1' });
   const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
   await handler({ method: 'GET', query: { resource: 'payment-methods' } }, res);
-  assert.equal(res.statusCode, 400);
+  assert.equal(res.statusCode, 200);
+  assert.equal(askedFor, 'cus_1');
+  assert.deepEqual(res.body, [{ id: 'pm_1', brand: 'visa', last4: '4242', expMonth: 8, expYear: 2030 }]);
+});
+
+// Having no billing account yet is an ordinary state, not a failure: the
+// family simply has no cards. An error here is what put "Couldn't load saved
+// cards" in front of every new signup.
+test('GET billing?resource=payment-methods returns an empty list when the caller has no billing account', async () => {
+  let called = false;
+  mockPaymentsModule({ listPaymentMethods: async () => { called = true; return []; } });
+  mockCors();
+  mockOwnerAuth();
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'GET', query: { resource: 'payment-methods' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, []);
+  assert.equal(called, false, 'should not call Stripe without a customer');
 });
 
 test('GET billing?resource=payment-methods rejects an unauthenticated caller', async () => {
@@ -139,14 +180,48 @@ test('POST billing customer-portal creates a session and returns its url', async
   assert.equal(captured.customerId, 'cus_1');
 });
 
-test('POST billing customer-portal requires a customerId', async () => {
-  mockPaymentsModule({});
+test('POST billing customer-portal with no customerId opens the caller\'s own portal', async () => {
+  let captured;
+  mockPaymentsModule({
+    createCustomerPortalSession: async (params) => { captured = params; return { url: 'https://billing.stripe.com/p/session_1' }; },
+  });
   mockCors();
-  mockAdminAuth();
+  mockOwnerAuth({ ownCustomerId: 'cus_1' });
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'customer-portal', returnUrl: 'https://example.com/account' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(captured.customerId, 'cus_1');
+});
+
+// Unlike listing cards, there is nothing to show someone with no billing
+// account — so this one does say so, rather than opening an empty portal.
+test('POST billing customer-portal explains itself when the caller has no billing account', async () => {
+  mockPaymentsModule({ createCustomerPortalSession: async () => ({ url: 'nope' }) });
+  mockCors();
+  mockOwnerAuth();
   const handler = require(path.join(backendRoot, 'api/billing.js'));
   const res = makeRes();
   await handler({ method: 'POST', body: { resource: 'customer-portal' } }, res);
-  assert.equal(res.statusCode, 400);
+  assert.equal(res.statusCode, 404);
+  assert.match(res.body.error, /save a card first/i);
+});
+
+// The detach path takes the same "omitted means mine" treatment, so the
+// portal never has to hold a customer id just to remove a card.
+test('POST billing payment-methods detach resolves the caller\'s own customer when none is given', async () => {
+  let detached = null;
+  mockPaymentsModule({
+    listPaymentMethods: async () => [{ id: 'pm_1' }],
+    detachPaymentMethod: async (id) => { detached = id; },
+  });
+  mockCors();
+  mockOwnerAuth({ ownCustomerId: 'cus_1' });
+  const handler = require(path.join(backendRoot, 'api/billing.js'));
+  const res = makeRes();
+  await handler({ method: 'POST', body: { resource: 'payment-methods', action: 'detach', paymentMethodId: 'pm_1' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(detached, 'pm_1');
 });
 
 test('POST billing setup-intent creates a student, a Stripe customer, and persists it', async () => {

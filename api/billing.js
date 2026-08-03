@@ -1,7 +1,8 @@
 // api/billing.js
-// GET  /api/billing?resource=payment-methods&customerId=cus_xxx  — list saved cards
+// GET  /api/billing?resource=payment-methods  — list the caller's saved cards
+//      (&customerId=cus_xxx to name a family; admin-only unless it's your own)
 // POST /api/billing { resource: 'payment-methods', action: 'detach', paymentMethodId }
-// POST /api/billing { resource: 'customer-portal', customerId, returnUrl }
+// POST /api/billing { resource: 'customer-portal', returnUrl }
 //
 // Parent-facing self-service billing endpoints, combined into one file
 // (Vercel's Hobby plan caps a deployment at 12 serverless functions and
@@ -26,6 +27,22 @@ async function callerOwnsCustomer(caller, customerId) {
     `/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&stripe_customer_id=eq.${encodeURIComponent(customerId)}&limit=1`
   );
   return students.length > 0;
+}
+
+// The caller's own Stripe customer id, from their students row.
+//
+// The portal used to dig this out of the customer's bookings, which meant a
+// family with no bookings yet couldn't see a card they had just saved
+// (SCRUM-93). The server has always known it; the client never needed to.
+//
+// Returns null when there's no billing account yet — a family who has never
+// saved a card or been billed simply has no cards, which is an empty list
+// rather than an error.
+async function callerCustomerId(caller) {
+  const students = await dbGet(
+    `/students?parent_email=eq.${encodeURIComponent(normalizeEmail(caller.email))}&select=stripe_customer_id&limit=1`
+  );
+  return (students[0] && students[0].stripe_customer_id) || null;
 }
 
 module.exports = async (req, res) => {
@@ -115,10 +132,18 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === 'GET' && req.query.resource === 'payment-methods') {
-    const { customerId } = req.query;
-    if (!customerId) return res.status(400).json({ error: 'customerId required' });
-    if (!(await callerOwnsCustomer(caller, customerId))) {
-      return res.status(403).json({ error: 'Forbidden' });
+    // customerId is optional. Omitted, it means "my own cards" and is
+    // resolved from the caller's own record; passed explicitly, it still
+    // goes through callerOwnsCustomer, which is what lets an admin read a
+    // named family's cards and stops anyone else doing the same.
+    let { customerId } = req.query;
+    if (customerId) {
+      if (!(await callerOwnsCustomer(caller, customerId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    } else {
+      customerId = await callerCustomerId(caller);
+      if (!customerId) return res.status(200).json([]);
     }
     try {
       const methods = await payments.listPaymentMethods(customerId);
@@ -154,11 +179,19 @@ module.exports = async (req, res) => {
     }
 
     if (resource === 'payment-methods') {
-      const { action, paymentMethodId, customerId } = req.body;
+      const { action, paymentMethodId } = req.body;
+      let { customerId } = req.body;
       if (action !== 'detach') return res.status(400).json({ error: 'Unknown action' });
-      if (!paymentMethodId || !customerId) return res.status(400).json({ error: 'paymentMethodId and customerId required' });
-      if (!(await callerOwnsCustomer(caller, customerId))) {
-        return res.status(403).json({ error: 'Forbidden' });
+      if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+      // As with the GET above: omitted means the caller's own account
+      // (SCRUM-93), explicit still goes through the ownership check.
+      if (customerId) {
+        if (!(await callerOwnsCustomer(caller, customerId))) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+      } else {
+        customerId = await callerCustomerId(caller);
+        if (!customerId) return res.status(404).json({ error: 'No billing account found for this login' });
       }
       try {
         // Confirm the payment method actually belongs to the customer the
@@ -211,10 +244,19 @@ module.exports = async (req, res) => {
       // features are enabled, business branding, etc. That's a one-time
       // manual setup step in the Stripe account, not something this
       // endpoint can do.
-      const { customerId, returnUrl } = req.body;
-      if (!customerId) return res.status(400).json({ error: 'customerId required' });
-      if (!(await callerOwnsCustomer(caller, customerId))) {
-        return res.status(403).json({ error: 'Forbidden' });
+      const { returnUrl } = req.body;
+      let { customerId } = req.body;
+      if (customerId) {
+        if (!(await callerOwnsCustomer(caller, customerId))) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+      } else {
+        // SCRUM-93: "Manage billing" used to be dead for any family whose
+        // customer id the portal couldn't find in their bookings.
+        customerId = await callerCustomerId(caller);
+        if (!customerId) {
+          return res.status(404).json({ error: 'No billing account yet — save a card first.' });
+        }
       }
       try {
         const session = await payments.createCustomerPortalSession({
