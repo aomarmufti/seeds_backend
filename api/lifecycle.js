@@ -962,34 +962,76 @@ module.exports = async (req, res) => {
       const bookings = await dbGet(`/bookings?id=eq.${bookingId}&limit=1`);
       const booking = bookings[0];
       if (!booking) return res.status(404).json({ error: 'Booking not found' });
-      if (!(await verifyTutorIdentity(caller, booking.tutor_name))) return res.status(403).json({ error: 'Forbidden' });
+
+      // SCRUM-99: this only ever authorised the tutor, so a family calling it
+      // for their own child's lesson got a 403 — which is why the 18-hour
+      // notice rule had no way of ever being exercised by the people it
+      // applies to. Both parties can cancel now, and *who* cancelled decides
+      // what it costs, so the two are resolved together rather than assumed.
+      let cancelledBy = null;
+      if (await verifyTutorIdentity(caller, booking.tutor_name)) {
+        // verifyTutorIdentity passes admins too. An admin cancelling on
+        // someone's behalf is 'seeds', not 'tutor' — same outcome for the
+        // family, but the audit trail shouldn't blame the tutor for it.
+        cancelledBy = caller.role === 'admin' ? 'seeds' : 'tutor';
+      } else if (booking.student_id && await verifyStudentAccess(caller, booking.student_id)) {
+        cancelledBy = 'family';
+      }
+      if (!cancelledBy) return res.status(403).json({ error: 'Forbidden' });
+
       if (booking.status === 'cancelled') return res.status(409).json({ error: 'This lesson is already cancelled.' });
+      // The policy treats a cancellation after start_time as a late one
+      // rather than an error, but that path belongs to admin: letting a
+      // family "cancel" a lesson that already ran would overwrite the
+      // tutor's attestation of what happened.
       if (new Date(booking.start_time) <= new Date()) {
         return res.status(409).json({ error: 'This lesson has already happened and can\'t be cancelled.' });
       }
 
+      // One place decides whether a cancelled lesson is chargeable, and it
+      // already knows all three cases. A tutor withdrawing never charges the
+      // family — the notice rule protects the tutor's held time, not the
+      // other way round — and a family gets the 18-hour rule.
+      const { assessCancellation } = require('../lib/cancellationPolicy');
+      const assessment = assessCancellation(booking, { cancelledBy });
+
+      // Only refund what isn't being charged. A late family cancellation is
+      // charged in full and the tutor is paid for it, so refunding there
+      // would hand the money back and still bill for the lesson.
       let refundResult = { refunded: false };
       let refundError = null;
-      try {
-        refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
-      } catch(refundErr) {
-        console.warn('Self-cancel refund failed:', refundErr.message);
-        refundError = refundErr.message;
+      if (!assessment.chargeable) {
+        try {
+          refundResult = await refundBooking(booking, { reason: 'requested_by_customer' });
+        } catch(refundErr) {
+          console.warn('Self-cancel refund failed:', refundErr.message);
+          refundError = refundErr.message;
+        }
       }
-      // SCRUM-88: the tutor is withdrawing from their own lesson, so the
-      // 18-hour notice rule never applies — it exists to protect the tutor's
-      // held time, not to charge a family for a lesson the tutor pulled out
-      // of. Marked 'waived' rather than left null so the booking is settled
-      // and the billing sweep has nothing to reconsider.
-      const patch = { status: 'cancelled', delivery_status: 'waived',
+
+      // Always attested, never left null: 'late_cancelled' is in the billing
+      // and payout sweeps' billable set and 'waived' is in neither, so the
+      // sweeps need no special case for a cancellation.
+      const patch = { status: 'cancelled', delivery_status: assessment.deliveryStatus,
                       delivery_marked_by: caller.email,
-                      delivery_note: 'Cancelled by tutor — not charged to the family.' };
+                      delivery_note: assessment.reason };
       if (refundResult.refunded) patch.payment_status = 'refunded';
       await supabaseRequest(`/bookings?id=eq.${bookingId}`, {
         method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch),
       });
-      await logAdminAction({ actor: caller.email, action: 'self-cancel-booking', targetType: 'booking', targetId: bookingId });
-      return res.status(200).json({ success: true, refunded: refundResult.refunded, refundError });
+      await logAdminAction({
+        actor: caller.email, action: 'self-cancel-booking',
+        targetType: 'booking', targetId: bookingId,
+        details: { cancelledBy, chargeable: assessment.chargeable },
+      });
+      return res.status(200).json({
+        success: true,
+        cancelledBy,
+        chargeable: assessment.chargeable,
+        reason: assessment.reason,
+        refunded: refundResult.refunded,
+        refundError,
+      });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 

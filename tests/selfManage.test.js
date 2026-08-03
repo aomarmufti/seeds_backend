@@ -161,3 +161,132 @@ test('self-reschedule-booking rejects a lesson that has already happened', async
   await handler({ method: 'POST', query: { resource: 'self-reschedule-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111', newStartTime: FUTURE } }, res);
   assert.equal(res.statusCode, 409);
 });
+
+// ── SCRUM-99: the family's side of the same endpoint ────────────────────
+// This only ever authorised the tutor, so a parent cancelling their own
+// child's lesson got a 403 — which meant the 18-hour notice rule in
+// lib/cancellationPolicy.js could never be exercised by the people it
+// applies to. Who cancels decides what it costs, so these assert the money.
+
+const familyCaller = { id: 'parent-1', role: 'student', email: 'parent@example.com' };
+const SOON = new Date(Date.now() + 2 * 3600 * 1000).toISOString(); // inside 18h
+
+function dbWithFamilyBooking(booking) {
+  return {
+    dbGet: async (p) => {
+      if (p.startsWith('/bookings?id=eq.')) return [booking];
+      if (p.startsWith('/students?id=eq.')) return [{ parent_email: 'parent@example.com' }];
+      if (p.startsWith('/profiles?id=eq.tutor-1')) return [{ tutor_name: 'Azeem Omar-Mufti' }];
+      if (p.startsWith('/profiles?id=eq.')) return [{ tutor_name: 'Someone Else' }];
+      if (p.startsWith('/billing_batches?id=eq.')) return [{ id: 'batch-1', stripe_payment_intent_id: 'pi_batch' }];
+      return [];
+    },
+  };
+}
+
+test('a family cancelling with more than 18h notice is not charged, and is refunded', async () => {
+  const patches = [];
+  let refunded = false;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => familyCaller },
+    payments: { createRefund: async () => { refunded = true; return { id: 're_1' }; } },
+    db: {
+      ...dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: FUTURE, payment_status: 'paid', billing_batch_id: 'batch-1', fee_pence: 4000 }),
+      supabaseRequest: async (p, opts) => { patches.push({ p, body: JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.cancelledBy, 'family');
+  assert.equal(res.body.chargeable, false);
+  assert.equal(patches[0].body.delivery_status, 'waived');
+  assert.equal(patches[0].body.payment_status, 'refunded');
+  assert.equal(refunded, true);
+});
+
+// The one that costs money if it's wrong: a late cancellation is charged in
+// full and the tutor is paid, so refunding here would hand the money back
+// and still bill for the lesson.
+test('a family cancelling inside 18h is charged in full and is NOT refunded', async () => {
+  const patches = [];
+  let refundCalled = false;
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => familyCaller },
+    payments: { createRefund: async () => { refundCalled = true; return { id: 're_1' }; } },
+    db: {
+      ...dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: SOON, payment_status: 'paid', billing_batch_id: 'batch-1', fee_pence: 4000 }),
+      supabaseRequest: async (p, opts) => { patches.push({ p, body: JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.chargeable, true);
+  assert.equal(patches[0].body.delivery_status, 'late_cancelled');
+  assert.equal(patches[0].body.payment_status, undefined, 'payment must stand');
+  assert.equal(refundCalled, false, 'a charged lesson must not be refunded');
+});
+
+// A free lesson has nothing to charge, so the notice rule is moot.
+test('a family cancelling a free lesson inside 18h is not charged', async () => {
+  const patches = [];
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => familyCaller },
+    db: {
+      ...dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: SOON, payment_status: 'unbilled', fee_pence: 0 }),
+      supabaseRequest: async (p, opts) => { patches.push({ p, body: JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.chargeable, false);
+  assert.equal(patches[0].body.delivery_status, 'waived');
+});
+
+// The notice rule protects the tutor's held time — it can't be turned round
+// to charge a family for a lesson the tutor pulled out of.
+test('a tutor cancelling inside 18h still never charges the family', async () => {
+  const patches = [];
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => tutorCaller },
+    payments: { createRefund: async () => ({ id: 're_1' }) },
+    db: {
+      ...dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: SOON, payment_status: 'paid', billing_batch_id: 'batch-1', fee_pence: 4000 }),
+      supabaseRequest: async (p, opts) => { patches.push({ p, body: JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.cancelledBy, 'tutor');
+  assert.equal(res.body.chargeable, false);
+  assert.equal(patches[0].body.delivery_status, 'waived');
+});
+
+test('an admin cancelling is recorded as seeds, not as the tutor', async () => {
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => ({ id: 'admin-1', role: 'admin', email: 'admin@example.com' }) },
+    payments: { createRefund: async () => ({ id: 're_1' }) },
+    db: {
+      ...dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: SOON, payment_status: 'paid', billing_batch_id: 'batch-1', fee_pence: 4000 }),
+      supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.cancelledBy, 'seeds');
+  assert.equal(res.body.chargeable, false);
+});
+
+test('a family cannot cancel another family\'s lesson', async () => {
+  const handler = loadWithMocks('api/lifecycle.js', {
+    auth: { requireAuth: async () => ({ id: 'parent-2', role: 'student', email: 'someone-else@example.com' }) },
+    db: dbWithFamilyBooking({ id: 'b1', student_id: 'stu-1', tutor_name: 'Azeem Omar-Mufti', status: 'confirmed', start_time: FUTURE, fee_pence: 4000 }),
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', query: { resource: 'self-cancel-booking' }, body: { bookingId: '11111111-1111-1111-1111-111111111111' } }, res);
+  assert.equal(res.statusCode, 403);
+});
