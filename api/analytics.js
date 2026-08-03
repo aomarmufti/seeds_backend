@@ -236,7 +236,7 @@ module.exports = async (req, res) => {
       const studentIds = students.map(s => s.id);
       const bookings = await dbGet(
         `/bookings?student_id=in.(${studentIds.join(',')})` +
-        `&select=id,subject,tutor_name,lesson_type,start_time,fee_pence,status,payment_status,meet_link,stripe_payment_intent_id,payment_link,student_id&order=start_time.desc`
+        `&select=id,subject,tutor_name,lesson_type,start_time,end_time,fee_pence,status,payment_status,delivery_status,meet_link,stripe_payment_intent_id,payment_link,student_id&order=start_time.desc`
       );
       return res.status(200).json({
         recentBookings: bookings.map(b => ({
@@ -245,9 +245,11 @@ module.exports = async (req, res) => {
           subject: b.subject,
           lessonType: b.lesson_type,
           startTime: b.start_time,
+          endTime: b.end_time || null,
           feePence: b.fee_pence,
           status: b.status,
           paymentStatus: b.payment_status,
+          deliveryStatus: b.delivery_status || null,
           meetLink: b.meet_link || null,
           paymentIntentId: b.stripe_payment_intent_id || null,
           paymentLink: b.payment_link || null,
