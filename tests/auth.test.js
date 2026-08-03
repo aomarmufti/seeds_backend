@@ -220,3 +220,160 @@ test('non-admin caller is rejected before any action runs', async () => {
   await handler({ method: 'POST', body: { action: 'create-student', fullName: 'X', email: 'x@example.com' } }, res);
   assert.equal(res.statusCode, 401);
 });
+
+// ── SCRUM-97: deleting an account ──────────────────────────────────────────
+// Deletion is for data that should never have existed. The property worth
+// protecting is that it refuses wherever there is history to lose — a family
+// who has had lessons or been billed must be deactivated, not erased.
+
+test('delete-account removes the student rows, profile and auth user when there is no history', async () => {
+  const dbCalls = [];
+  const adminCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles')) return [{ email: 'Test@Example.com' }];
+        if (path.startsWith('/students')) return [{ id: 'stu-1' }];
+        return []; // no bookings, no billing batches
+      },
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async (path, opts) => { adminCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-account', userId: 'user-1' } }, res);
+  assert.equal(res.statusCode, 200);
+  const deletes = dbCalls.filter((c) => c.method === 'DELETE').map((c) => c.path);
+  assert.deepEqual(deletes, ['/students?id=eq.stu-1', '/profiles?id=eq.user-1']);
+  assert.deepEqual(adminCalls, [{ path: '/auth/v1/admin/users/user-1', method: 'DELETE' }]);
+});
+
+test('delete-account refuses an account that has lessons, and names what is blocking it', async () => {
+  const dbCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles')) return [{ email: 'real@example.com' }];
+        if (path.startsWith('/students')) return [{ id: 'stu-1' }];
+        if (path.startsWith('/bookings')) return [{ id: 'bk-1' }];
+        return [];
+      },
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-account', userId: 'user-1' } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body.blockedBy, ['lessons']);
+  assert.match(res.body.error, /Deactivate it instead/);
+  assert.equal(dbCalls.filter((c) => c.method === 'DELETE').length, 0, 'nothing may be deleted');
+});
+
+test('delete-account refuses an account that has billing history', async () => {
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles')) return [{ email: 'real@example.com' }];
+        if (path.startsWith('/students')) return [{ id: 'stu-1' }];
+        if (path.startsWith('/billing_batches')) return [{ id: 'bb-1' }];
+        return [];
+      },
+      supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-account', userId: 'user-1' } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body.blockedBy, ['billing history']);
+});
+
+test('delete-account refuses to delete the admin who is calling it', async () => {
+  const handler = loadWithMocks('api/auth.js', {
+    auth: { requireAdmin: async () => ({ id: 'admin-1', email: 'admin@example.com' }) },
+    db: {
+      dbGet: async () => [],
+      supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-account', userId: 'admin-1' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test('delete-tutor refuses a tutor who has taught, even though no foreign key would stop it', async () => {
+  const dbCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/bookings')) return [{ id: 'bk-1' }];
+        return [];
+      },
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-tutor', tutorName: 'Ada Teacher' } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body.blockedBy, ['lessons']);
+  assert.equal(dbCalls.filter((c) => c.method === 'DELETE').length, 0);
+});
+
+test('delete-tutor refuses a tutor who has been paid', async () => {
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => (path.startsWith('/payouts') ? [{ id: 'po-1' }] : []),
+      supabaseRequest: async () => ({ ok: true, json: async () => ({}) }),
+      supabaseAdminRequest: async () => ({ ok: true, json: async () => ({}) }),
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-tutor', tutorName: 'Ada Teacher' } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body.blockedBy, ['payouts']);
+});
+
+test('delete-tutor removes the tutor account, tutors row, profile and auth user when clean', async () => {
+  const dbCalls = [];
+  const adminCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async (path) => {
+        if (path.startsWith('/profiles')) return [{ tutor_name: 'Ada Teacher' }];
+        return [];
+      },
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async (path, opts) => { adminCalls.push({ path, method: opts && opts.method }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'delete-tutor', userId: 'user-9' } }, res);
+  assert.equal(res.statusCode, 200);
+  const deletes = dbCalls.filter((c) => c.method === 'DELETE').map((c) => c.path);
+  assert.deepEqual(deletes, [
+    '/tutor_accounts?tutor_name=eq.Ada%20Teacher',
+    '/tutors?name=eq.Ada%20Teacher',
+    '/profiles?id=eq.user-9',
+  ]);
+  assert.deepEqual(adminCalls, [{ path: '/auth/v1/admin/users/user-9', method: 'DELETE' }]);
+});
+
+test('reactivate-account lifts the ban and restores the role', async () => {
+  const dbCalls = [];
+  const adminCalls = [];
+  const handler = loadWithMocks('api/auth.js', {
+    db: {
+      dbGet: async () => [],
+      supabaseRequest: async (path, opts) => { dbCalls.push({ path, body: opts && JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+      supabaseAdminRequest: async (path, opts) => { adminCalls.push({ path, body: opts && JSON.parse(opts.body) }); return { ok: true, json: async () => ({}) }; },
+    },
+  });
+  const res = makeRes();
+  await handler({ method: 'POST', body: { action: 'reactivate-account', userId: 'user-1', role: 'tutor' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(adminCalls[0].body.ban_duration, 'none');
+  assert.equal(dbCalls.find((c) => c.path.startsWith('/profiles')).body.role, 'tutor');
+});
