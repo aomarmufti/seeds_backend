@@ -575,6 +575,16 @@ Postgres DB ✅  →  Django (running on :8000) ✅  →  Tables ✅  →  API �
 
 This is the part you said you struggled with, so slow down and read the comments.
 
+**From now on you'll have three windows open. Keep them straight:**
+
+| Window | What it's for | Prompt looks like | You type |
+|---|---|---|---|
+| **Terminal 1** | Runs the server. **Leave it alone**; it's busy and shows a log | no prompt, just log lines | nothing |
+| **Terminal 2** | Your commands: `curl`, `python manage.py shell`, `pip`… | `(venv) azeemmufti@MacBook seeds-mini %` | commands |
+| **Database window** | Looking at tables | `seeds_mini=#` | **only SQL**, ending in `;` |
+
+Every command block below says which window to use. If a prompt ends in `#` and you're about to type `python`, `curl` or `cd`, stop: wrong window.
+
 An API endpoint is: **a URL + a function**. The URL says *where*; the function says *what to do*. Two files:
 
 **File 1: `tutors/views.py`** (the functions). Replace everything with:
@@ -639,7 +649,12 @@ Read it top to bottom. The function does the same five things *every* API does:
 | `Tutor.objects.create(name=…, subject=…)` | Roughly `INSERT INTO tutors_tutor (name, subject) VALUES (…);`. `status=201` means "created". |
 | final `return … status=405` | Any other method (DELETE, PUT…) falls through to "not allowed". |
 
-**See the real SQL yourself.** In Terminal (bubble active, in `~/seeds-mini`):
+**See the real SQL yourself.** In **Terminal 2** (not Terminal 1, which is busy running the server, and not the database window). Open a new Terminal window, then:
+```bash
+cd ~/seeds-mini
+source venv/bin/activate
+```
+then:
 ```bash
 python manage.py shell
 ```
