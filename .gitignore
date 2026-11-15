@@ -1,1 +1,7 @@
 node_modules/
+
+# Django
+__pycache__/
+*.pyc
+.venv/
+django_seeds/db.sqlite3
