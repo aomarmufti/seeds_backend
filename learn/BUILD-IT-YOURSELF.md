@@ -1096,6 +1096,7 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 | `No changes detected` on makemigrations | App not registered / file not saved | Check `"tutors"` in `INSTALLED_APPS`; save `models.py` |
 | `You have N unapplied migration(s)` | Skipped migrate | `python manage.py migrate` |
 | `That port is already in use` | Old server still running | `Ctrl + C` in the old window, or `lsof -i :8000` then `kill <PID>` |
+| Safari / Chrome: **"Can't connect to the server"** or `ERR_CONNECTION_REFUSED` for `localhost:8000` | **The Django server isn't running** (window closed, never started, or it stopped after an error) | Open a normal Terminal: `cd ~/seeds-mini`, `source venv/bin/activate`, `python manage.py runserver`. Read what it prints. If it shows a red error instead of `Starting development server`, fix that first (read the last line) |
 | Browser: `Failed to fetch` | Backend not running **or** CORS not fixed | Is Terminal 1 running? Console message mentions CORS → Part 9 |
 | Console: `blocked by CORS policy` | Origin not allowed | Part 9; origin must exactly equal the page address |
 | `403 CSRF verification failed` on POST | `@csrf_exempt` missing | Restore it above `def tutors` |
