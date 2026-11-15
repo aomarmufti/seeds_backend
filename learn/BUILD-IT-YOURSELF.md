@@ -1364,6 +1364,8 @@ What I measured in a real browser (5 tutors in the table):
 | `403 Forbidden: CSRF verification failed` on `/graphql/` | The GraphQL view isn't wrapped in `csrf_exempt(...)` | Use the `urls.py` from Part 12 |
 | GraphiQL playground stays on "Loading…" | It loads its screen from a public website (`unpkg.com`) and your network blocked it | Check your internet, or use the `curl` versions in Part 12 |
 | `ModuleNotFoundError: No module named 'strawberry'` | Installed outside the bubble, or not installed | `source venv/bin/activate` then `pip install strawberry-graphql` |
+| Page says **`Load failed`** (Safari's wording; Chrome says `Failed to fetch`) | The page loaded, but its request to the backend (port 8000) failed: **the Django server isn't running**, or CORS isn't set up | Check Terminal 1 is running `python manage.py runserver` with no red error; then see the CORS rows |
+| `localhost:3000/index.html` shows **`Error response: 404 File not found`** | The page server on port 3000 is running **from the wrong folder** (not `frontend/`) | `Ctrl + C` in that window, then `cd ~/seeds-mini/frontend`, `ls` (you should see `index.html`), then `python3 -m http.server 3000` |
 | Browser: `Failed to fetch` | Backend not running **or** CORS not fixed | Is Terminal 1 running? Console message mentions CORS → Part 9 |
 | Console: `blocked by CORS policy` | Origin not allowed | Part 9; origin must exactly equal the page address |
 | `403 CSRF verification failed` on POST | `@csrf_exempt` missing | Restore it above `def tutors` |
