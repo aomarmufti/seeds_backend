@@ -1294,6 +1294,49 @@ curl -i -X POST http://localhost:8000/graphql/ -H "Content-Type: application/jso
 
 **For a CRM/billing system:** REST is usually the default, because it's simple, cacheable, and easy to audit and rate-limit by URL. GraphQL earns its place when many different screens need different slices of the same data.
 
+### 👀 See the page-side difference in a real browser
+
+The same page can use either API. Make a GraphQL copy of your page:
+
+1. In VS Code, **copy `frontend/index.html` to a new file `frontend/graphql.html`**.
+2. In `graphql.html`, find the function `loadTutors` (from the comment `// Ask the backend for all tutors and draw them.` down to its closing `}`) and **replace it with**:
+
+```javascript
+    // GraphQL version: same address for everything, and we say exactly which fields we want.
+    async function loadTutors() {
+      const response = await fetch(`${API}/graphql/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "{ tutors { name subject } }" }),   // <- the page picks the fields
+      });
+      const result = await response.json();
+      if (result.errors) throw new Error(result.errors[0].message);     // GraphQL errors arrive inside a 200
+      const tutors = result.data.tutors;
+
+      list.innerHTML = "";
+      if (tutors.length === 0) {
+        list.innerHTML = "<li>No tutors yet. Add one below.</li>";
+      }
+      for (const tutor of tutors) {
+        const li = document.createElement("li");
+        li.textContent = `${tutor.name}: ${tutor.subject}`;
+        list.appendChild(li);
+      }
+    }
+```
+
+3. Make sure both servers are running, then open **http://localhost:3000/index.html** (REST) and **http://localhost:3000/graphql.html** (GraphQL).
+4. On each page press **`Cmd + Option + I`**, go to the **Network** tab, refresh, and click the request to `localhost:8000`.
+
+What I measured in a real browser (5 tutors in the table):
+
+| | `index.html` (REST) | `graphql.html` (GraphQL) |
+|---|---|---|
+| Request | `GET /api/tutors/` | `POST /graphql/` with body `{"query":"{ tutors { name subject } }"}` |
+| Server | `localhost:8000` | `localhost:8000` (**the same server and port**) |
+| Response | 288 bytes, includes `id` | 232 bytes, no `id` (the page didn't ask for it) |
+| What the user sees | the same list | the same list |
+
 ### 🏋️ Exercises
 1. **REST:** add `GET /api/tutors/<id>/` (a new route in `urls.py` plus a new function in `views.py`). Return `404` if the tutor doesn't exist.
 2. **GraphQL:** add a `deleteTutor(id: Int!)` mutation to `schema.py`.
