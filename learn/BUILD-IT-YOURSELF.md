@@ -21,6 +21,16 @@ You'll be able to point at each box, say what it does, and watch a message trave
 - **Editor** = where you edit code files. Install **VS Code** (free): https://code.visualstudio.com
 - When a code block starts with `bash` it's a command you type into **Terminal**, then press **Enter**. Don't type the `$`. Other code blocks are file contents.
 - A finished, tested copy of everything lives in `learn/seeds-mini-reference/`. If you ever get lost, compare your file with the one there.
+- **You will use two different kinds of window. Mixing them up is the #1 beginner mistake:**
+
+  | | **Database window** | **Normal Terminal** |
+  |---|---|---|
+  | How to open | Double-click a database in the **Postgres app** | `Cmd + Space`, type `Terminal`, Enter |
+  | Prompt looks like | `seeds_mini=#` (ends in `#`) | `azeemmufti@MacBook ~ %` (ends in `%`) |
+  | You type | **SQL** (`CREATE DATABASE ...;`, `SELECT ...;`) | **commands** (`cd`, `python3`, `pip`, `python manage.py`) |
+  | To leave it | `\q` then Enter | just close it |
+
+  If you type a command like `cd` or `python3` after a prompt ending in `#`, nothing useful happens. Each part below says which window to use.
 - **Errors are normal.** Every developer sees them all day. An error message is the computer telling you exactly what it needs. Read the **last line** first.
 
 ### The five words you asked about, in one place
@@ -65,7 +75,7 @@ whoami
 
 **Idea:** Postgres is one program that can hold many separate **databases**, like one filing cabinet with many drawers. We'll make a new drawer for this project so it doesn't mix with your practice table.
 
-1. In the Postgres app window, **double-click the `azeemmufti` database icon**. A Terminal window opens, already connected. The prompt looks like `azeemmufti=#`.
+1. In the Postgres app window, **double-click the `azeemmufti` database icon**. This opens the **database window**, already connected. The prompt looks like `azeemmufti=#`. (It only understands SQL.)
 2. Type this (the `;` at the end matters) and press Enter:
 
 ```sql
@@ -78,7 +88,7 @@ Check it exists:
 ```sql
 \l
 ```
-You should see `seeds_mini` in the list. Press `q` if it asks you to scroll. Leave this window open (or close it, either is fine).
+You should see `seeds_mini` in the list. Press `q` if it asks you to scroll. When you're done, type `\q` and press Enter to leave it, then close the window. **From Part 2 onwards you use a normal Terminal**, so don't keep typing into this one.
 
 > 🔧 **`ERROR: database "seeds_mini" already exists`** → fine, you did this already. Move on.
 > 🔧 **Nothing happens after pressing Enter / prompt shows `azeemmufti-#`** → you forgot the `;`. Type `;` and press Enter.
@@ -86,6 +96,8 @@ You should see `seeds_mini` in the list. Press `q` if it asks you to scroll. Lea
 ---
 
 ## Part 2: Make a project folder and a Python "bubble" (10 min)
+
+> ⚠️ **Use a normal Terminal for this part** (`Cmd + Space` → `Terminal`), **not** the database window from Part 1. Check the prompt ends in `%`, not `#`.
 
 **Idea:** Python projects each get their own **virtual environment** (a "bubble"). Packages you install go inside the bubble, so projects can't break each other.
 
@@ -662,6 +674,7 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 
 | You see | Cause | Fix |
 |---|---|---|
+| Typed commands and **nothing happens**; prompt looks like `seeds_mini=#` or `seeds_mini-#` | You're in the **database window** (SQL only) | Type `\q` + Enter to leave it, then open a **normal Terminal** (`Cmd + Space` → `Terminal`) |
 | `command not found: python3` | Python missing | Install from python.org (Part 0) |
 | `command not found: django-admin`, `pip`, or `ModuleNotFoundError` | The bubble (venv) isn't active | `cd ~/seeds-mini && source venv/bin/activate`. Prompt must show `(venv)` |
 | `zsh: no matches found: ...[binary]` | Missing quotes | Use the exact install command with quotes |
