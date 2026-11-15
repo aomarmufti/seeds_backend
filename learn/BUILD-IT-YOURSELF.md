@@ -14,6 +14,23 @@ You'll be able to point at each box, say what it does, and watch a message trave
 
 ---
 
+## What we're doing, and why it's a separate project
+
+You have **two different projects**. Don't mix them up:
+
+| | `seeds-backend` (already exists) | `seeds-mini` (we create it now) |
+|---|---|---|
+| What it is | Your real Seeds backend: payments, bookings, emails. About 30 files | A tiny practice backend with ~5 files that **you write** |
+| Language | JavaScript (Node) | Python (Django) |
+| Where it lives | Your existing folder | New folder `~/seeds-mini` |
+| Do we change it? | **No** | Yes, it's all yours |
+
+**Why not just study the real one?** It has dozens of files and hundreds of lines per file, so it's too much to learn from. `seeds-mini` has the **same moving parts at 1/20th of the size**: a database, an API, a frontend. You build each part yourself, so you know what every file does. Afterwards, you open the real `seeds-backend`, and each file will look familiar. You'll recognise "that's the same as my `views.py`".
+
+**The plan:** build `seeds-mini` (this guide) → read the real backend with a map in hand → write a **new endpoint of your own**.
+
+---
+
 ## How to use this guide
 
 - Do the parts **in order**. Each part ends with a **✅ Checkpoint**: what you should see. If you see it, move on. If not, go to the **🔧 If something goes wrong** box right under it. There's also a big **Troubleshooting** table near the end.
@@ -148,12 +165,13 @@ What you just made:
 - `tutors/` = an **app**: one area of functionality. Ours handles tutors.
 - `manage.py` = the control panel for the project. You'll run `python manage.py ...` a lot.
 
-Open the folder in VS Code:
+Open the folder in VS Code. **Open the `seeds-mini` folder (the new one in your home folder), not `seeds-backend`.** If VS Code already has `seeds-backend` open, that's fine, just open a new window for this:
 ```bash
 code .
 ```
 
-> 🔧 **`code: command not found`** → open VS Code yourself, choose **File → Open Folder…**, pick `seeds-mini` in your home folder.
+> 🔧 **`code: command not found`** → do it by hand: in VS Code choose **File → New Window**, then **File → Open Folder…**. In the dialog press `Cmd + Shift + H` (jumps to your home folder), click **`seeds-mini`**, then **Open**.
+> 🔧 **Check you opened the right one:** the title at the top of the left sidebar must say **SEEDS-MINI**, and show `config`, `tutors`, `manage.py` and `venv`. If it says SEEDS-BACKEND, you're in the wrong project. You'll see `api` and `lib` folders instead.
 > 🔧 **`django-admin: command not found`** → bubble not active (`source venv/bin/activate`) or Django didn't install (redo Part 2).
 > 🔧 **You forgot the dot and now there's a `config/config/` folder** → run `rm -rf config manage.py` then repeat the first command above **with the dot**.
 
