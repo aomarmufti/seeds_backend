@@ -1080,6 +1080,227 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 
 ---
 
+## Part 12: Add GraphQL next to REST, and compare (30–40 min)
+
+You asked to play with both and see the difference. So far you only have REST. In this part you add a GraphQL "front door" to the **same Django app, the same `Tutor` table, the same Postgres**. Then you ask for the same things both ways.
+
+### 🧠 What GraphQL is, in the restaurant picture
+
+- **REST** is a set menu. Each URL (`/api/tutors/`) is one fixed plate. You get whatever the plate contains.
+- **GraphQL** is one counter where you tell the chef **exactly which ingredients you want**, even from several dishes in one order.
+
+The kitchen (Django) and the pantry (Postgres) don't change. Only the way you order does.
+
+New words:
+
+| Word | Meaning |
+|---|---|
+| **Endpoint** | GraphQL has **one** address: `/graphql/`. Everything goes there. |
+| **Schema** | The typed menu: what things exist (`Tutor`) and what fields they have (`id`, `name`, `subject`). |
+| **Query** | A request to **read** data. You write the fields you want. |
+| **Mutation** | A request to **change** data (REST's POST/PUT/DELETE). |
+
+### 🛠 Steps
+
+**1.** In **Terminal 2** (bubble active, `(venv)` showing):
+```bash
+cd ~/seeds-mini
+source venv/bin/activate
+pip install strawberry-graphql
+```
+(Tested with version 0.341.2.) You don't need to stop the server.
+
+**2.** Create a **new file `tutors/schema.py`** with:
+```python
+import strawberry
+
+from .models import Tutor
+
+
+@strawberry.type
+class TutorType:
+    """The shape of a tutor in GraphQL. Clients can ask for any of these fields."""
+
+    id: int
+    name: str
+    subject: str
+
+
+def to_type(tutor: Tutor) -> TutorType:
+    return TutorType(id=tutor.id, name=tutor.name, subject=tutor.subject)
+
+
+@strawberry.type
+class Query:
+    """Everything a client can READ."""
+
+    @strawberry.field
+    def tutors(self) -> list[TutorType]:
+        return [to_type(t) for t in Tutor.objects.order_by("id")]
+
+    @strawberry.field
+    def tutor(self, id: int) -> TutorType | None:
+        tutor = Tutor.objects.filter(id=id).first()
+        return to_type(tutor) if tutor else None
+
+
+@strawberry.type
+class Mutation:
+    """Everything a client can CHANGE."""
+
+    @strawberry.mutation
+    def add_tutor(self, name: str, subject: str) -> TutorType:
+        name, subject = name.strip(), subject.strip()
+        if not name or not subject:
+            raise ValueError("name and subject are required")
+        return to_type(Tutor.objects.create(name=name, subject=subject))
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation)
+```
+
+**3.** Replace **`config/urls.py`** with (the only changes are the three new lines about GraphQL and `csrf_exempt`):
+```python
+from django.contrib import admin
+from django.urls import path
+from django.views.decorators.csrf import csrf_exempt
+from strawberry.django.views import GraphQLView
+
+from tutors import views
+from tutors.schema import schema
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/tutors/", views.tutors),
+    path("graphql/", csrf_exempt(GraphQLView.as_view(schema=schema))),
+]
+```
+
+**4.** Look at **Terminal 1**. It reloads itself. If it prints a red error, read the last line (see the 🔧 box).
+
+✅ **Checkpoint:** open **http://localhost:8000/graphql/** in your browser. You should get an interactive playground called **GraphiQL**, with a left pane to type queries and a right pane for answers. (It loads its screen from a public website, so it needs internet. If it says "Loading…" forever, use the `curl` commands below instead.)
+
+> 🔧 **`ModuleNotFoundError: No module named 'strawberry'`** → the bubble wasn't active when you installed it. `source venv/bin/activate`, then run the `pip install` again.
+> 🔧 **`403 Forbidden — CSRF verification failed`** when sending a query → the `csrf_exempt(...)` wrapper is missing in `urls.py`. This is the same security check we switched off for the REST view. I hit this exact error while testing.
+> 🔧 **Red error mentioning `schema`** → compare `tutors/schema.py` with the block above. Python cares about the indentation.
+
+### 🧠 How `schema.py` works
+
+| Piece | What it means |
+|---|---|
+| `class TutorType` with `id: int`, `name: str`, `subject: str` | The **shape** a client may ask for. It's a menu item with three optional ingredients. |
+| `to_type(tutor)` | Converts a database row (`Tutor`) into that shape. |
+| `class Query` → `tutors()` and `tutor(id)` | Everything a client can **read**. Each method is one thing you can ask for. They use the same `Tutor.objects` as your REST view. |
+| `class Mutation` → `add_tutor(...)` | Everything a client can **change**. It has the same "name and subject are required" rule as REST. |
+| `schema = strawberry.Schema(query=..., mutation=...)` | Bundles the menu together. |
+| `GraphQLView.as_view(schema=schema)` in `urls.py` | The single doorway at `/graphql/`. |
+| `csrf_exempt(...)` | Same reason as `@csrf_exempt` on the REST view: our own client doesn't send Django's CSRF token. |
+
+Notice **`add_tutor` in Python becomes `addTutor` in GraphQL**: names are converted to camelCase automatically.
+
+### 🧪 Play: the same job, both ways
+
+Run the REST ones in **Terminal 2**. For GraphQL, either type the query in the **playground's left pane and press the ▶ button**, or use the `curl` version.
+
+**Experiment 1: list tutors**
+
+REST:
+```bash
+curl http://localhost:8000/api/tutors/
+```
+GraphQL (playground):
+```graphql
+{ tutors { id name subject } }
+```
+GraphQL (curl):
+```bash
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"{ tutors { id name subject } }"}'
+```
+👀 Same data. Notice the GraphQL answer is wrapped in `{"data": {...}}`.
+
+**Experiment 2: only the names**
+
+REST: you can't. It always sends everything. To change that you'd edit `views.py`.
+
+GraphQL:
+```graphql
+{ tutors { name } }
+```
+```bash
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"{ tutors { name } }"}'
+```
+👀 Only names come back. In my test with 2 tutors, REST sent **125 bytes** and this sent **70**. With big tables and many fields that gap is the main argument for GraphQL.
+
+**Experiment 3: two things in one request**
+```graphql
+{ everyone: tutors { name }  first: tutor(id: 1) { subject } }
+```
+```bash
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"{ everyone: tutors { name } first: tutor(id: 1) { subject } }"}'
+```
+👀 The list and one tutor's subject come back **in one round trip**. With REST that's two requests. (`everyone:` and `first:` are labels you choose for each answer.)
+
+**Experiment 4: add a tutor**
+
+REST:
+```bash
+curl -i -X POST http://localhost:8000/api/tutors/ -H "Content-Type: application/json" -d '{"name":"Priya Shah","subject":"Chemistry"}'
+```
+GraphQL:
+```graphql
+mutation { addTutor(name: "Priya Shah", subject: "Chemistry") { id name } }
+```
+```bash
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"mutation { addTutor(name: \"Priya Shah\", subject: \"Chemistry\") { id name } }"}'
+```
+👀 Either way the row lands in the **same table**. Check in the database window: `SELECT * FROM tutors_tutor;`. GraphQL lets you choose which fields come back about the new tutor (`{ id name }`). REST sent back all of them.
+
+**Experiment 5: make mistakes on purpose (the biggest difference)**
+
+| Mistake | REST | GraphQL |
+|---|---|---|
+| Empty name | `HTTP 400` + `{"error": "name and subject are required"}` | **`HTTP 200`** + `{"data": null, "errors": [{"message": "name and subject are required", ...}]}` |
+| Ask for a field that doesn't exist | REST has no such idea | `errors`: `Cannot query field 'email' on type 'TutorType'.` |
+| Typo in the query | n/a | `errors`: `Syntax Error: Expected Name, found <EOF>.` |
+| Ask for a tutor that doesn't exist | `HTTP 404` (once you add a route for one tutor) | `HTTP 200` + `{"data": {"tutor": null}}` |
+
+Try them:
+```bash
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"mutation { addTutor(name: \"\", subject: \"x\") { id } }"}'
+curl -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"{ tutors { email } }"}'
+curl -i -X POST http://localhost:8000/graphql/ -H "Content-Type: application/json" -d '{"query":"{ tutor(id: 999) { name } }"}'
+```
+👀 **Every one of those, success or failure, came back as HTTP 200.** With GraphQL you must look **inside the body** for an `errors` list. REST uses the status code itself (`400`, `404`). That matters: tools that watch status codes to spot failures (monitoring, alerts, caches) see GraphQL errors as successes unless they're built to read the body.
+
+**Experiment 6 (playground only): explore.** The playground has a **Docs** panel that lists everything the schema offers, and it autocompletes field names as you type. That's GraphQL's "self-describing" feature: a new developer can discover the whole API without a separate document. With REST you'd write and maintain that documentation yourself.
+
+### ⚖️ Side by side
+
+| | **REST** (`/api/tutors/`) | **GraphQL** (`/graphql/`) |
+|---|---|---|
+| Addresses | One per resource (and per action) | **One** |
+| Who decides what comes back | The server (`views.py`) | **The client** (the query) |
+| Fetching several things | Several requests | One request (Experiment 3) |
+| Errors | HTTP status: `400`, `404`, `405` | `HTTP 200` + an `errors` list |
+| Adding a new field | Change the view | Add it to `TutorType`; clients opt in |
+| Documentation | You write it | Built in (playground Docs) |
+| Caching | Easy: a URL + GET | Harder: always a POST to one URL |
+| Learning curve | Lower | Higher (schema, queries, mutations) |
+| Often used for | Billing/CRM systems, public and partner APIs | Apps with many screens needing different slices of data |
+
+**A fairness note:** "get one tutor" is easy in GraphQL only because I wrote a `tutor(id:)` field. In REST you'd add `/api/tutors/<id>/` (try it as an exercise below). The amount of work is similar. What differs is **where the choices live**: in REST the server fixes the response shape; in GraphQL the client picks it.
+
+**What stays identical:** the table, `models.py`, `Tutor.objects`, Postgres, the admin site. GraphQL is only a different front door onto the same kitchen. Real systems often run both.
+
+**For a CRM/billing system:** REST is usually the default, because it's simple, cacheable, and easy to audit and rate-limit by URL. GraphQL earns its place when many different screens need different slices of the same data.
+
+### 🏋️ Exercises
+1. **REST:** add `GET /api/tutors/<id>/` (a new route in `urls.py` plus a new function in `views.py`). Return `404` if the tutor doesn't exist.
+2. **GraphQL:** add a `deleteTutor(id: Int!)` mutation to `schema.py`.
+3. **Compare:** which took more lines? Which gave the client more control? Which was easier to test with `curl`?
+
+---
+
 ## Troubleshooting (find your symptom)
 
 | You see | Cause | Fix |
@@ -1097,6 +1318,9 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 | `You have N unapplied migration(s)` | Skipped migrate | `python manage.py migrate` |
 | `That port is already in use` | Old server still running | `Ctrl + C` in the old window, or `lsof -i :8000` then `kill <PID>` |
 | Safari / Chrome: **"Can't connect to the server"** or `ERR_CONNECTION_REFUSED` for `localhost:8000` | **The Django server isn't running** (window closed, never started, or it stopped after an error) | Open a normal Terminal: `cd ~/seeds-mini`, `source venv/bin/activate`, `python manage.py runserver`. Read what it prints. If it shows a red error instead of `Starting development server`, fix that first (read the last line) |
+| `403 Forbidden: CSRF verification failed` on `/graphql/` | The GraphQL view isn't wrapped in `csrf_exempt(...)` | Use the `urls.py` from Part 12 |
+| GraphiQL playground stays on "Loading…" | It loads its screen from a public website (`unpkg.com`) and your network blocked it | Check your internet, or use the `curl` versions in Part 12 |
+| `ModuleNotFoundError: No module named 'strawberry'` | Installed outside the bubble, or not installed | `source venv/bin/activate` then `pip install strawberry-graphql` |
 | Browser: `Failed to fetch` | Backend not running **or** CORS not fixed | Is Terminal 1 running? Console message mentions CORS → Part 9 |
 | Console: `blocked by CORS policy` | Origin not allowed | Part 9; origin must exactly equal the page address |
 | `403 CSRF verification failed` on POST | `@csrf_exempt` missing | Restore it above `def tutors` |
@@ -1135,6 +1359,9 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 - **CORS**: the browser rule that stops a page reading from a *different origin* unless the server allows it.
 - **Virtual environment (venv)**: the project's private bubble of Python packages.
 - **Migration vs. makemigrations**: `makemigrations` writes the plan; `migrate` runs it.
+- **GraphQL**: an API style with one address where the *client* writes a query naming exactly the fields it wants.
+- **Schema (GraphQL)**: the typed menu of everything a client may ask for.
+- **Query / mutation**: GraphQL's words for "read data" and "change data".
 
 ---
 
@@ -1149,5 +1376,5 @@ Your **data survives** restarts: it's in Postgres, not in the Django program.
 ### Good next steps
 1. Add a `Student` model and a `Booking` that links a student to a tutor. Make a migration and see the foreign key in Postgres.
 2. Add `DELETE` to the API, and a delete button in the page.
-3. Read `django_seeds/GUIDE.md`.
+3. Finish the Part 12 exercises, then read `django_seeds/GUIDE.md`.
 4. Ask for the next stage (login/security, payments and invoices, or analysing the data in Databricks).
