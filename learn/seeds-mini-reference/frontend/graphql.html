@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seeds Mini</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+    li { padding: 6px 0; }
+    input, button { font-size: 16px; padding: 8px; margin: 4px 0; }
+    input { width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; }
+    #message { color: #b00020; min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1>Seeds tutors</h1>
+  <ul id="list"><li>Loading…</li></ul>
+
+  <h2>Add a tutor</h2>
+  <form id="form">
+    <input id="name" placeholder="Name, e.g. Amina Rahman">
+    <input id="subject" placeholder="Subject, e.g. Maths">
+    <button type="submit">Add tutor</button>
+  </form>
+  <p id="message"></p>
+
+  <script>
+    // The address of the BACKEND. The page itself is served from a different
+    // address (port 3000), so we have to say where the API lives.
+    const API = "http://localhost:8000";
+
+    const list = document.getElementById("list");
+    const message = document.getElementById("message");
+
+    // GraphQL version: same address for everything, and we say exactly which fields we want.
+    async function loadTutors() {
+      const response = await fetch(`${API}/graphql/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "{ tutors { name subject } }" }),   // <- the page picks the fields
+      });
+      const result = await response.json();
+      if (result.errors) throw new Error(result.errors[0].message);     // GraphQL errors arrive inside a 200
+      const tutors = result.data.tutors;
+
+      list.innerHTML = "";
+      if (tutors.length === 0) {
+        list.innerHTML = "<li>No tutors yet. Add one below.</li>";
+      }
+      for (const tutor of tutors) {
+        const li = document.createElement("li");
+        li.textContent = `${tutor.name}: ${tutor.subject}`;
+        list.appendChild(li);
+      }
+    }
+
+    // When the form is submitted, send a POST request with JSON.
+    document.getElementById("form").addEventListener("submit", async (event) => {
+      event.preventDefault();                                       // stop the page reloading
+      message.textContent = "";
+      try {
+        const response = await fetch(`${API}/api/tutors/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: document.getElementById("name").value,
+            subject: document.getElementById("subject").value,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {                                         // 400 etc: show the server's reason
+          message.textContent = data.error || `Server answered ${response.status}`;
+          return;
+        }
+        event.target.reset();
+        await loadTutors();                                         // refresh the list
+      } catch (err) {
+        message.textContent = "Could not reach the backend: " + err.message;
+      }
+    });
+
+    loadTutors().catch((err) => {
+      list.innerHTML = "";
+      message.textContent = "Could not load tutors: " + err.message;
+    });
+  </script>
+</body>
+</html>
